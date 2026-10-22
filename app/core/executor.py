@@ -17,11 +17,18 @@ def execute_plan(moves: List[Move], output_root: str, dry_run: bool = True) -> L
     done: List[dict] = []
     for m in moves:
         src, dest = Path(m.src), Path(m.dest)
-        print(f"  {src.name}  ->  {m.folder}/{dest.name}   ({m.reason})")
+        category = "/".join(part for part in (m.folder, m.subfolder) if part)
+        if not m.selected:
+            print(f"  {src.name}  ->  kept in place (unselected: {category})")
+            continue
+        print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
         if dry_run:
             continue
         if not src.exists():
             print(f"    skipped: source missing")
+            continue
+        if dest.exists():
+            print(f"    skipped: destination already exists")
             continue
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)

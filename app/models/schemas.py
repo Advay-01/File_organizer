@@ -21,7 +21,16 @@ class SortingAction(BaseModel):
     """One move decided by the LLM (validated before anything touches disk)."""
 
     path: str = Field(description="Original path, copied exactly from the input")
-    folder: str = Field(description="Topic folder name, e.g. AI, DSA, Projects")
+    target_path: str = Field(
+        default="",
+        description="Required two-tier destination, e.g. Physics/Lecture Notes",
+    )
+    reasoning: str = Field(default="", description="Short explanation of the grouping")
+    folder: str = Field(default="", description="Legacy topic folder name, e.g. AI, DSA, Projects")
+    subfolder: str = Field(
+        default="",
+        description="Optional one-level category inside folder, e.g. Notes or Exams",
+    )
     new_name: str = Field(default="", description="Optional cleaner filename; empty = keep")
     reason: str = ""
 

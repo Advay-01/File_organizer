@@ -3,4 +3,9 @@ pydantic>=2
 python-dotenv
 pypdf
 python-docx
+python-pptx
+openpyxl
+pillow
+pillow-heif
+rarfile
 pytest

@@ -10,15 +10,22 @@ from typing import Dict, List, Optional
 from app.core.classifier import LLMClassifier
 from app.models.schemas import FileInfo
 
-SYSTEM_PROMPT = """You organize files into topic folders based on their CONTENT, not their extension.
-You get a list of existing folders and a list of files (filename, extension, a content snippet).
+SYSTEM_PROMPT = """You are a smart file-system architect. Look at each file's name, format, and content, then generate a dynamic two-tier folder structure (Category/Subcategory) to organize it.
+You get existing topic folders, their existing subfolders, and files (filename, extension, and a content snippet).
+
+CRITICAL GROUPING RULE (prevent sprawl):
+- Do NOT create hyper-specific folders for minor differences.
+- Group vague, fuzzy, or related topics under broader, universally understood umbrella concepts.
+- If a topic is vague but leans toward a concept, put it in that category's subfolder rather than creating a new one.
+- Prefer an existing category or subcategory when it fits. Create a concise new subcategory only when it provides a genuinely useful broad grouping.
+
 Rules:
-1. Prefer an existing folder when it fits. Create a new short folder name (1-2 words, e.g. "AI", "DSA", "Projects", "Finance") only when none fits.
-2. Folder names are plain names, never paths, no slashes.
-3. If a file's content is unclear, use the filename; if still unclear use "Misc".
-4. Return EVERY input file exactly once. Copy "path" exactly as given.
-5. "new_name" is optional: a cleaner filename WITH the same extension, or "" to keep the name.
-Respond with ONLY JSON: {"actions":[{"path":"...","folder":"...","new_name":"","reason":"short"}]}"""
+1. Return every input file exactly once and copy its "path" exactly as given.
+2. "target_path" must contain exactly two plain folder names separated by one slash, for example "Physics/Lecture Notes". It must never include a filename, a leading slash, or extra levels.
+3. If content is unclear, use the filename; if still unclear use "Misc/General".
+4. "new_name" is optional: a cleaner filename with the same extension, or "" to keep the name.
+5. Respond only with valid JSON in this batch format:
+{"actions":[{"path":"...","target_path":"Main Category/Subcategory","reasoning":"Why this grouping makes sense","new_name":""}]}"""
 
 _BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -26,6 +33,23 @@ _BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 def sanitize_folder(name: str) -> str:
     name = _BAD.sub("", (name or "").strip()).strip(". ")
     return name[:40] or "Misc"
+
+
+def sanitize_subfolder(name: str) -> str:
+    """Allow an empty optional subfolder, but never a path."""
+    if not (name or "").strip():
+        return ""
+    return sanitize_folder(name)
+
+
+def sanitize_target_path(target_path: str) -> tuple[str, str]:
+    """Accept exactly Category/Subcategory and turn malformed output into Misc/General."""
+    parts = [part.strip() for part in re.split(r"[\\/]+", target_path or "") if part.strip()]
+    if len(parts) != 2 or any(part in {".", ".."} for part in parts):
+        return "Misc", "General"
+    category = sanitize_folder(parts[0])
+    subcategory = sanitize_subfolder(parts[1])
+    return category, subcategory or "General"
 
 
 def sanitize_filename(name: str, original: str) -> str:
@@ -45,6 +69,8 @@ class Move:
     dest: str
     folder: str
     reason: str
+    subfolder: str = ""
+    selected: bool = True
 
 
 def _batches(files: List[FileInfo], size: int) -> List[List[FileInfo]]:
@@ -64,10 +90,22 @@ def build_plan(
     chosen: Dict[str, Move] = {}
     taken: set = set()
     root = Path(output_root)
+    if not folders and root.is_dir():
+        folders = sorted(item.name for item in root.iterdir() if item.is_dir() and not item.name.startswith("."))
+    subfolders_by_topic = {
+        folder: sorted(
+            item.name
+            for item in (root / folder).iterdir()
+            if item.is_dir() and not item.name.startswith(".")
+        )
+        for folder in folders
+        if (root / folder).is_dir()
+    }
 
     for batch in _batches(files, batch_size):
         payload = {
             "existing_folders": folders,
+            "existing_subfolders": subfolders_by_topic,
             "files": [
                 {"path": f.path, "filename": f.filename, "extension": f.extension,
                  "size_kb": f.size_kb, "snippet": f.snippet}
@@ -79,13 +117,20 @@ def build_plan(
             f = by_path.get(a.path)
             if f is None or a.path in chosen:
                 continue  # hallucinated or duplicate path: ignore
-            folder = sanitize_folder(a.folder)
+            if a.target_path:
+                folder, subfolder = sanitize_target_path(a.target_path)
+            else:
+                folder = sanitize_folder(a.folder)
+                subfolder = sanitize_subfolder(a.subfolder)
             if folder not in folders:
                 folders.append(folder)
+            if subfolder and subfolder not in subfolders_by_topic.setdefault(folder, []):
+                subfolders_by_topic[folder].append(subfolder)
             name = sanitize_filename(a.new_name, f.filename)
-            dest = _unique(root / folder / name, taken)
+            destination_folder = root / folder / subfolder if subfolder else root / folder
+            dest = _unique(destination_folder / name, taken)
             taken.add(str(dest))
-            chosen[a.path] = Move(a.path, str(dest), folder, a.reason)
+            chosen[a.path] = Move(a.path, str(dest), folder, a.reasoning or a.reason, subfolder)
 
     # Anything the model skipped goes to Misc rather than being left behind.
     for f in files:

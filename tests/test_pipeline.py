@@ -1,13 +1,22 @@
 """End-to-end tests with a fake LLM (no network, no API keys)."""
+import gzip
 import json
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from app.core.classifier import LLMClassifier, extract_json
 from app.core.executor import execute_plan, undo_last
 from app.core.extractor import attach_snippets, extract_snippet
-from app.core.planner import build_plan, sanitize_filename, sanitize_folder
+from app.core.planner import (
+    build_plan,
+    sanitize_filename,
+    sanitize_folder,
+    sanitize_subfolder,
+    sanitize_target_path,
+)
 from app.core.scanner import scan_directory
 
 
@@ -47,6 +56,24 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Neural", next(f for f in files if f.filename == "notes1.txt").snippet)
         self.assertEqual(extract_snippet(str(self.root / "random.bin")), "")
 
+    def test_subtitles_and_archives_provide_classifier_context(self):
+        subtitle = self.root / "lesson.vtt"
+        subtitle.write_text("WEBVTT\n\n00:00.000 --> 00:02.000\nTransformer attention overview")
+        zipped = self.root / "course-files.zip"
+        with zipfile.ZipFile(zipped, "w") as archive:
+            archive.writestr("notes/neural-networks.txt", "content")
+        tarred = self.root / "code.tar"
+        with tarfile.open(tarred, "w") as archive:
+            archive.add(subtitle, arcname="lesson.vtt")
+        compressed = self.root / "topics.txt.gz"
+        with gzip.open(compressed, "wt") as archive:
+            archive.write("binary tree practice")
+
+        self.assertIn("Transformer attention", extract_snippet(str(subtitle)))
+        self.assertIn("neural-networks.txt", extract_snippet(str(zipped)))
+        self.assertIn("lesson.vtt", extract_snippet(str(tarred)))
+        self.assertIn("binary tree", extract_snippet(str(compressed)))
+
     def test_dry_run_moves_nothing(self):
         files = attach_snippets(scan_directory(str(self.root)))
         moves = build_plan(files, str(self.root), LLMClassifier(["x"], fake_llm))
@@ -66,6 +93,32 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue((self.root / "notes1.txt").exists())
         self.assertFalse((self.root / "AI" / "notes1.txt").exists())
 
+    def test_apply_never_overwrites_a_destination_created_after_preview(self):
+        files = attach_snippets(scan_directory(str(self.root)))
+        moves = build_plan(files, str(self.root), LLMClassifier(["x"], fake_llm))
+        planned_move = next(move for move in moves if move.src.endswith("notes1.txt"))
+        destination = Path(planned_move.dest)
+        destination.parent.mkdir(parents=True)
+        destination.write_text("do not replace")
+
+        done = execute_plan(moves, str(self.root), dry_run=False)
+
+        self.assertTrue((self.root / "notes1.txt").exists())
+        self.assertEqual(destination.read_text(), "do not replace")
+        self.assertEqual(len(done), 2)
+
+    def test_unselected_target_keeps_its_files_in_the_source_folder(self):
+        files = attach_snippets(scan_directory(str(self.root)))
+        moves = build_plan(files, str(self.root), LLMClassifier(["x"], fake_llm))
+        notes_move = next(move for move in moves if move.src.endswith("notes1.txt"))
+        notes_move.selected = False
+
+        done = execute_plan(moves, str(self.root), dry_run=False)
+
+        self.assertTrue((self.root / "notes1.txt").exists())
+        self.assertFalse(Path(notes_move.dest).exists())
+        self.assertEqual(len(done), 2)
+
     def test_name_collisions_get_suffix(self):
         sub = self.root / "sub"
         sub.mkdir()
@@ -75,6 +128,33 @@ class PipelineTests(unittest.TestCase):
         dests = [m.dest for m in moves if m.folder == "AI"]
         self.assertEqual(len(dests), len(set(dests)))
         self.assertEqual(len(dests), 2)
+
+    def test_plan_supports_safe_topic_subfolders(self):
+        def physics_llm(model, messages):
+            payload = json.loads(messages[1]["content"])
+            actions = []
+            for item in payload["files"]:
+                subfolder = "Formula Sheets" if item["filename"] == "notes1.txt" else "Lab Reports"
+                actions.append({
+                    "path": item["path"],
+                    "target_path": f"Physics/{subfolder}",
+                    "reasoning": "physics material",
+                })
+            return json.dumps({"actions": actions})
+
+        files = scan_directory(str(self.root))
+        moves = build_plan(files, str(self.root), LLMClassifier(["x"], physics_llm))
+        notes = next(move for move in moves if move.src.endswith("notes1.txt"))
+        exam = next(move for move in moves if move.src.endswith("trees.md"))
+        self.assertEqual(notes.subfolder, "Formula Sheets")
+        self.assertEqual(Path(notes.dest), self.root / "Physics" / "Formula Sheets" / "notes1.txt")
+        self.assertEqual(Path(exam.dest), self.root / "Physics" / "Lab Reports" / "trees.md")
+
+    def test_subfolder_sanitizer_never_returns_a_path(self):
+        self.assertEqual(sanitize_subfolder(""), "")
+        self.assertEqual(sanitize_subfolder("../../Exams/"), "Exams")
+        self.assertEqual(sanitize_target_path("Physics/Lab Reports"), ("Physics", "Lab Reports"))
+        self.assertEqual(sanitize_target_path("Physics/../../escape"), ("Misc", "General"))
 
     def test_hallucinated_and_missing_paths_handled(self):
         def bad_llm(model, messages):

@@ -67,7 +67,6 @@ def main(argv=None) -> int:
     print(f"Found {len(files)} file(s).")
     if not files:
         return 0
-
     attach_snippets(files, args.snippet_chars)
     models = resolve_models(args.model)
     print(f"Models (in fallback order): {', '.join(models)}")

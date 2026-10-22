@@ -2,13 +2,13 @@
 
 Model strings pick the provider, e.g.:
     gemini/gemini-2.5-flash     (GEMINI_API_KEY)
-    ollama/llama3.2             (local, http://localhost:11434)
     openai/gpt-5.6-luna         (OPENAI_API_KEY)
     deepseek/deepseek-chat      (DEEPSEEK_API_KEY)
 Pass several models to get automatic fallback in order.
 """
 from __future__ import annotations
-
+import time
+import random
 import json
 import re
 from typing import Callable, List, Optional
@@ -67,20 +67,45 @@ class LLMClassifier:
         self.retries_per_model = retries_per_model
 
     def classify(self, system_prompt: str, user_prompt: str) -> OrganizerResponse:
-        """Try each model in order; return the first schema-valid response."""
+        """Try models in order, retrying temporary provider failures."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+
         errors: List[str] = []
+
         for model in self.models:
             for attempt in range(self.retries_per_model + 1):
                 try:
                     raw = self.completion_fn(model, messages)
                     return OrganizerResponse.model_validate(extract_json(raw))
+
                 except (ValueError, ValidationError) as e:
-                    errors.append(f"{model} (bad output, try {attempt + 1}): {e}")
-                except Exception as e:  # network / auth / rate limit
-                    errors.append(f"{model}: {type(e).__name__}: {e}")
-                    break  # don't retry a hard failure, move to next model
+                    errors.append(
+                        f"{model} (bad output, attempt {attempt + 1}): {e}"
+                    )
+
+                except Exception as e:
+                    errors.append(
+                        f"{model} (attempt {attempt + 1}): "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+                    # Retry temporary provider/network failures.
+                    message = str(e).lower()
+                    temporary = any(term in message for term in [
+                        "503", "unavailable", "overloaded",
+                        "429", "rate limit", "timeout",
+                        "connection", "500", "502", "504",
+                    ])
+
+                    if not temporary:
+                        break
+
+                if attempt < self.retries_per_model:
+                    delay = min(2 ** (attempt + 1), 16)
+                    time.sleep(delay + random.uniform(0, 1))
+
         raise RuntimeError("All models failed:\n  " + "\n  ".join(errors))
+
