@@ -8,4 +8,6 @@ openpyxl
 pillow
 pillow-heif
 rarfile
+fastapi
+uvicorn[standard]
 pytest

@@ -33,6 +33,23 @@ The UI creates topic folders inside the selected folder and uses the same safe p
 The plan creates a dynamic `Category/Subcategory` path from each file's name, format, and content. It creates broad useful subcategories on the spot—not from a fixed list—while avoiding one-off folders for tiny differences. For example, Physics files might become `Physics/Lab Reports` or `Physics/Formula Sheets`. Both folder levels are validated and shown in the preview before confirmation.
 
 Every proposed target subfolder starts **Selected** in the preview. Select any file in a target and click **Toggle Target** (or double-click its row) to switch it to **Keep in root**. That entire target group is excluded from organization, so its files are not moved.
+
+## React Desktop UI
+The `frontend/` folder contains the dark, electric-violet Sortly interface. It communicates only with the local API in `app/api.py`; the API stores the exact preview plan and never re-runs classification when you confirm.
+
+In one PowerShell window, start the local API from the project root:
+```
+.venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8765
+```
+
+In a second PowerShell window, start the React interface:
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Open the local address shown by Vite (normally `http://127.0.0.1:5173`). Choose a folder, analyze it, toggle any target groups you want to keep at the root, and explicitly confirm the remaining moves. The current React build is ready for local use; add Tauri packaging after validating the workflow so a packaged Windows app can launch the Python API as a sidecar.
 Pick models with `-m` (repeat for fallbacks) or `ORGANIZER_MODELS` in `.env`:
 `gemini/gemini-2.5-flash`, `ollama/llama3.2`, `openai/<model>`, `deepseek/deepseek-chat`.
 Default: Gemini first, local Ollama as fallback.
