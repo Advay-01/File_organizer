@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import FastAPI
+
 from app import desktop_server
 
 
@@ -44,6 +46,22 @@ class ConfigurationTests(unittest.TestCase):
     def test_missing_env_file_fails_clearly(self):
         with self.assertRaises(FileNotFoundError):
             desktop_server._load_env_file(Path("does-not-exist.env"))
+
+    def test_shutdown_route_requires_its_token(self):
+        class Server:
+            should_exit = False
+
+        application = FastAPI()
+        server = Server()
+        desktop_server._install_shutdown_route(application, server, "test-token")
+        route = next(route for route in application.routes if route.path == "/api/shutdown")
+
+        with self.assertRaises(Exception):
+            route.endpoint(None)
+        with self.assertRaises(Exception):
+            route.endpoint("wrong-token")
+        self.assertEqual(route.endpoint("test-token"), {"stopping": True})
+        self.assertTrue(server.should_exit)
 
 
 class EntryPointTests(unittest.TestCase):

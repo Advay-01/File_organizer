@@ -11,8 +11,10 @@ shutdown.
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import multiprocessing
+import os
 import signal
 import sys
 from pathlib import Path
@@ -22,6 +24,7 @@ from dotenv import load_dotenv
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+SHUTDOWN_TOKEN_ENV = "SORTLY_SHUTDOWN_TOKEN"
 
 
 def _loopback_host(value: str) -> str:
@@ -91,7 +94,25 @@ def build_server(host: str, port: int, log_level: str):
         server_header=False,
         timeout_graceful_shutdown=5,
     )
-    return uvicorn.Server(config)
+    server = uvicorn.Server(config)
+    token = os.getenv(SHUTDOWN_TOKEN_ENV, "")
+    if token:
+        _install_shutdown_route(app, server, token)
+    return server
+
+
+def _install_shutdown_route(application, server, token: str) -> None:
+    """Install a one-run, token-protected shutdown route for the desktop host."""
+    from fastapi import Header, HTTPException
+
+    @application.post("/api/shutdown", include_in_schema=False)
+    def shutdown(x_sortly_shutdown_token: str | None = Header(default=None)):
+        if not x_sortly_shutdown_token or not hmac.compare_digest(
+            x_sortly_shutdown_token, token
+        ):
+            raise HTTPException(403, "Invalid shutdown token.")
+        server.should_exit = True
+        return {"stopping": True}
 
 
 def _install_windows_break_handler(server) -> None:

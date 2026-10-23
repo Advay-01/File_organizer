@@ -1,6 +1,9 @@
 .idea/
 .venv/
 .pyinstaller-venv/
+.tools/
+.cargo/
+.rustup/
 __pycache__/
 *.pyc
 .env
@@ -8,6 +11,10 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/*.exe
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo

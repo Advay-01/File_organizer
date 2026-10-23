@@ -1,4 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowRight,
@@ -19,11 +21,12 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import HistoryPanel from "./components/HistoryPanel";
 import { Button } from "./components/ui/button";
 
-const API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
+const BROWSER_API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
+const DESKTOP = isTauri();
 
 type PlanItem = {
   id: string;
@@ -38,9 +41,15 @@ type PlanItem = {
 type Preview = { plan_id: string; source: string; files: PlanItem[]; analysis_seconds: number; already_organized: number };
 type HierarchyNode = { name: string; files: string[]; folders: HierarchyNode[] };
 type Completion = { moved: number; kept_in_root: number; hierarchy: HierarchyNode };
+type ApiRuntime = {
+  state: "starting" | "ready" | "error";
+  base_url?: string | null;
+  detail?: string | null;
+};
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
+async function request<T>(apiBase: string, path: string, body?: unknown): Promise<T> {
+  if (!apiBase) throw new Error("The local Sortly service is not ready yet.");
+  const response = await fetch(`${apiBase}${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -63,6 +72,43 @@ export default function App() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [undoAvailable, setUndoAvailable] = useState(false);
   const [completion, setCompletion] = useState<Completion | null>(null);
+  const [apiRuntime, setApiRuntime] = useState<ApiRuntime>(() => ({
+    state: DESKTOP ? "starting" : "ready",
+    base_url: DESKTOP ? null : BROWSER_API,
+  }));
+  const apiBase = apiRuntime.base_url ?? "";
+  const apiReady = apiRuntime.state === "ready" && Boolean(apiBase);
+
+  useEffect(() => {
+    if (!DESKTOP) return;
+    let active = true;
+    let timer: number | undefined;
+
+    async function poll() {
+      try {
+        const status = await invoke<ApiRuntime>("get_api_status");
+        if (!active) return;
+        if (status.state === "ready" && status.base_url) {
+          const health = await fetch(`${status.base_url}/api/health`, { cache: "no-store" });
+          if (!health.ok) throw new Error(`Health check failed with HTTP ${health.status}.`);
+        }
+        setApiRuntime(status);
+        if (status.state === "starting") {
+          timer = window.setTimeout(() => void poll(), 400);
+        }
+      } catch (caught) {
+        if (!active) return;
+        const detail = caught instanceof Error ? caught.message : "Could not start the local service.";
+        setApiRuntime({ state: "error", detail });
+      }
+    }
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, []);
 
   const groups = useMemo(() => {
     const grouped = new Map<string, PlanItem[]>();
@@ -83,8 +129,18 @@ export default function App() {
   async function chooseFolder() {
     setError("");
     try {
-      const result = await request<{ source: string }>("/api/choose-folder", {});
-      setSource(result.source);
+      if (DESKTOP) {
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: "Choose a folder to organize",
+        });
+        if (typeof selected !== "string") return;
+        setSource(selected);
+      } else {
+        const result = await request<{ source: string }>(apiBase, "/api/choose-folder", {});
+        setSource(result.source);
+      }
       resetPreview();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Folder picker unavailable.";
@@ -93,13 +149,13 @@ export default function App() {
   }
 
   async function createPreview() {
-    if (!source.trim()) return;
+    if (!source.trim() || !apiReady) return;
     setBusy("preview");
     setError("");
     setMessage("");
     resetPreview();
     try {
-      const result = await request<Preview>("/api/preview", { source, recursive, rename, reorganize });
+      const result = await request<Preview>(apiBase, "/api/preview", { source, recursive, rename, reorganize });
       setPreview(result);
       setSource(result.source);
       setSelectedTargets(Object.fromEntries(result.files.map((file) => [file.target_path, file.selected])));
@@ -114,7 +170,7 @@ export default function App() {
   }
 
   async function applyPlan() {
-    if (!preview) return;
+    if (!preview || !apiReady) return;
     setConfirmOpen(false);
     setBusy("apply");
     setError("");
@@ -122,7 +178,7 @@ export default function App() {
       const selected_targets = Object.entries(selectedTargets)
         .filter(([, selected]) => selected)
         .map(([target]) => target);
-      const result = await request<Completion>("/api/apply", {
+      const result = await request<Completion>(apiBase, "/api/apply", {
         plan_id: preview.plan_id,
         selected_targets,
       });
@@ -138,11 +194,11 @@ export default function App() {
   }
 
   async function undo() {
-    if (!source.trim()) return;
+    if (!source.trim() || !apiReady) return;
     setBusy("undo");
     setError("");
     try {
-      const result = await request<{ restored: number }>("/api/undo", { source });
+      const result = await request<{ restored: number }>(apiBase, "/api/undo", { source });
       setMessage(result.restored ? `Restored ${result.restored} files.` : "There was no organization run to undo.");
       setUndoAvailable(false);
       setCompletion(null);
@@ -158,10 +214,10 @@ export default function App() {
   }
 
   async function openFolder() {
-    if (!source.trim()) return;
+    if (!source.trim() || !apiReady) return;
     setError("");
     try {
-      await request("/api/open-folder", { source });
+      await request(apiBase, "/api/open-folder", { source });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not open the folder.");
     }
@@ -184,7 +240,7 @@ export default function App() {
         <div className="flex items-center gap-3 rounded-xl border border-violet-400/15 bg-violet-400/[0.09] px-3 py-3 text-sm text-violet-200">
           <FolderSearch size={17} /> Organize files
         </div>
-        <Button variant="ghost" className="mt-2 justify-start" onClick={undo} disabled={!undoAvailable || busy !== null}>
+        <Button variant="ghost" className="mt-2 justify-start" onClick={undo} disabled={!undoAvailable || busy !== null || !apiReady}>
           <RotateCcw size={17} /> Undo last move
         </Button>
 
@@ -202,7 +258,8 @@ export default function App() {
             Workspace <ChevronRight size={13} /> <span className="text-zinc-200">Organize</span>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-white/[0.08] px-3 py-1.5 text-xs text-zinc-400">
-            <span className="size-1.5 rounded-full bg-emerald-400" /> Local API
+            <span className={`size-1.5 rounded-full ${apiReady ? "bg-emerald-400" : apiRuntime.state === "error" ? "bg-red-400" : "bg-amber-400"}`} />
+            {apiReady ? "Local API ready" : apiRuntime.state === "error" ? "Local API unavailable" : "Starting local API"}
           </div>
         </header>
 
@@ -222,7 +279,7 @@ export default function App() {
                   className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-600"
                   placeholder={String.raw`C:\Users\you\Documents`}
                 />
-                <Button variant="secondary" size="sm" onClick={chooseFolder} disabled={busy !== null}><Folder size={14} /> Browse</Button>
+                <Button variant="secondary" size="sm" onClick={chooseFolder} disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
               </div>
               <div className="mt-4 flex items-center justify-between gap-4">
                 <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
@@ -239,7 +296,7 @@ export default function App() {
                 </label>
                 <div className="flex items-center gap-4">
                   <span className="hidden items-center gap-2 text-xs text-zinc-500 sm:flex"><ShieldCheck size={15} className="text-emerald-400" /> Preview only · No files moved</span>
-                  <Button onClick={createPreview} disabled={busy !== null || !source.trim()}>
+                  <Button onClick={createPreview} disabled={busy !== null || !source.trim() || !apiReady}>
                     {busy === "preview" ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
                     Analyze folder <ArrowRight size={15} />
                   </Button>
@@ -250,6 +307,7 @@ export default function App() {
             <AnimatePresence>
               {message && <Notice tone="success" text={message} />}
               {error && <Notice tone="error" text={error} />}
+              {apiRuntime.state === "error" && <Notice tone="error" text={`Local API unavailable. ${apiRuntime.detail ?? ""}`.trim()} />}
             </AnimatePresence>
 
             <AnimatePresence>
@@ -305,7 +363,9 @@ export default function App() {
             </AnimatePresence>
 
             <section className="mt-6 rounded-2xl border border-white/[0.08] bg-[#18181f] p-5">
-              <HistoryPanel folder={source || undefined} apiBase={API} onChanged={() => { setUndoAvailable(false); setCompletion(null); }} />
+              {apiReady
+                ? <HistoryPanel folder={source || undefined} apiBase={apiBase} onChanged={() => { setUndoAvailable(false); setCompletion(null); }} />
+                : <p className="text-sm text-zinc-500">{apiRuntime.state === "error" ? "History is unavailable until the local service restarts." : "Starting the local file service…"}</p>}
             </section>
           </motion.div>
         </div>
@@ -320,7 +380,7 @@ export default function App() {
             <Dialog.Description className="mt-2 text-sm leading-relaxed text-zinc-400">Sortly will move {selectedCount} selected files using the exact preview above. Unselected target groups stay in the source folder.</Dialog.Description>
             <div className="mt-6 flex gap-3">
               <Dialog.Close asChild><Button variant="secondary" className="flex-1">Cancel</Button></Dialog.Close>
-              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
+              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null || !apiReady}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

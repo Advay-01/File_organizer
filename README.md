@@ -49,10 +49,36 @@ npm install
 npm run dev
 ```
 
-Open the local address shown by Vite (normally `http://127.0.0.1:5173`). Choose a folder, analyze it, toggle any target groups you want to keep at the root, and explicitly confirm the remaining moves. The current React build is ready for local use; add Tauri packaging after validating the workflow so a packaged Windows app can launch the Python API as a sidecar.
+Open the local address shown by Vite (normally `http://127.0.0.1:5173`). Choose a folder, analyze it, toggle any target groups you want to keep at the root, and explicitly confirm the remaining moves.
 Pick models with `-m` (repeat for fallbacks) or `ORGANIZER_MODELS` in `.env`:
 `gemini/gemini-2.5-flash`, `ollama/llama3.2`, `openai/<model>`, `deepseek/deepseek-chat`.
 Default: Gemini first, local Ollama as fallback.
+
+### Tauri 2 desktop app
+
+The Windows desktop shell launches the bundled Python API on a dynamically selected
+loopback port and gives the React frontend the actual address after a health check.
+
+```powershell
+npm install
+cd frontend
+npm install
+cd ..
+npm run rust:setup
+npm run desktop:dev
+```
+
+Build the optimized executable and NSIS installer:
+
+```powershell
+npm run desktop:build
+```
+
+These commands use the project-local `.cargo` and `.rustup` directories, stage
+the PyInstaller sidecar under the required target-triple name, and keep Tauri's
+NSIS tools under `src-tauri/target`. Provider credentials are never bundled. For
+a packaged build, place `sortly.env` in the Tauri application configuration
+directory or set `SORTLY_ENV_FILE` to an external environment file before launch.
 
 ## How it works
 `scanner` (file facts) -> `extractor` (text snippet from txt/code/PDF/DOCX) -> `planner` (batches files to the LLM, validates output) -> `executor` (dry run / move / undo log).
