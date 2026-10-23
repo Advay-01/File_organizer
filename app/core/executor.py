@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 import json
-import shutil
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
 from app.core.planner import Move
+from app.core.safety import UnsafePathError, move_file_no_overwrite, validate_move_paths
 
 UNDO_LOG = ".organizer_undo.json"
 
 
-def execute_plan(moves: List[Move], output_root: str, dry_run: bool = True) -> List[dict]:
+def execute_plan(
+    moves: List[Move],
+    output_root: str,
+    dry_run: bool = True,
+    source_root: str | None = None,
+) -> List[dict]:
     """Move files. Returns the list of moves actually made (empty on dry run)."""
     done: List[dict] = []
     for m in moves:
@@ -24,6 +30,16 @@ def execute_plan(moves: List[Move], output_root: str, dry_run: bool = True) -> L
         print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
         if dry_run:
             continue
+        try:
+            validate_move_paths(
+                src,
+                dest,
+                Path(output_root),
+                Path(source_root) if source_root else None,
+            )
+        except UnsafePathError as error:
+            print(f"    skipped: unsafe path ({error})")
+            continue
         if not src.exists():
             print(f"    skipped: source missing")
             continue
@@ -31,8 +47,13 @@ def execute_plan(moves: List[Move], output_root: str, dry_run: bool = True) -> L
             print(f"    skipped: destination already exists")
             continue
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dest))
+            validate_move_paths(
+                src,
+                dest,
+                Path(output_root),
+                Path(source_root) if source_root else None,
+            )
+            move_file_no_overwrite(src, dest)
             done.append({"src": str(src), "dest": str(dest)})
         except OSError as e:
             print(f"    FAILED: {e}")
@@ -44,30 +65,22 @@ def execute_plan(moves: List[Move], output_root: str, dry_run: bool = True) -> L
 def _write_log(output_root: str, done: List[dict]) -> None:
     log = Path(output_root) / UNDO_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
-    history = json.loads(log.read_text()) if log.exists() else []
+    try:
+        history = json.loads(log.read_text(encoding="utf-8")) if log.exists() else []
+    except (OSError, ValueError):
+        history = []
     history.append({"time": datetime.now().isoformat(timespec="seconds"), "moves": done})
-    log.write_text(json.dumps(history, indent=2))
+    temporary = log.with_name(log.name + ".tmp")
+    temporary.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    os.replace(temporary, log)
 
 
 def undo_last(output_root: str) -> int:
-    """Reverse the most recent run. Returns number of files restored."""
-    log = Path(output_root) / UNDO_LOG
-    if not log.exists():
+    """Reverse the most recent run using the hardened history implementation."""
+    from app.core.history import undo_last_run
+
+    result = undo_last_run(output_root)
+    if result is None:
         print("Nothing to undo.")
         return 0
-    history = json.loads(log.read_text())
-    if not history:
-        print("Nothing to undo.")
-        return 0
-    last = history.pop()
-    restored = 0
-    for mv in reversed(last["moves"]):
-        src, dest = Path(mv["src"]), Path(mv["dest"])
-        if dest.exists() and not src.exists():
-            src.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dest), str(src))
-            restored += 1
-        else:
-            print(f"  could not restore {dest.name}")
-    log.write_text(json.dumps(history, indent=2))
-    return restored
+    return int(result["restored"])

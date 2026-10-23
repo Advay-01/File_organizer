@@ -127,7 +127,12 @@ def main(argv=None) -> int:
 
     if a.apply:
         with contextlib.redirect_stdout(io.StringIO()):  # executor prints one line per file
-            done = execute_plan(res.moves, out, dry_run=False)
+            done = execute_plan(
+                res.moves,
+                out,
+                dry_run=False,
+                source_root=a.source,
+            )
         if done:
             history.remember_folder(out)  # makes this folder appear in the global history view
         runs = history.list_runs(out)

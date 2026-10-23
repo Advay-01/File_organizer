@@ -17,12 +17,14 @@ import {
   LoaderCircle,
   LockKeyhole,
   RotateCcw,
+  Settings2,
   ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import HistoryPanel from "./components/HistoryPanel";
+import ProviderStudio from "./components/ProviderStudio";
 import { Button } from "./components/ui/button";
 
 const BROWSER_API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
@@ -31,16 +33,38 @@ const DESKTOP = isTauri();
 type PlanItem = {
   id: string;
   name: string;
+  current_path: string;
   destination_name: string;
   target_path: string;
   reasoning: string;
   renamed: boolean;
   selected: boolean;
+  category: string;
+  confidence: "high" | "medium" | "low" | "insufficient";
+  evidence_excerpt: string;
+  evidence_sources: string[];
+  warnings: string[];
+  filename_conflict: "none" | "generic" | "misleading" | "extension_mismatch";
+  evidence_sufficient: boolean;
+  detected_type: string;
+  extraction_status: string;
+  rename_reason: string;
+  sensitive: boolean;
 };
 
-type Preview = { plan_id: string; source: string; files: PlanItem[]; analysis_seconds: number; already_organized: number };
+type Preview = {
+  plan_id: string;
+  source: string;
+  files: PlanItem[];
+  analysis_seconds: number;
+  already_organized: number;
+  plan_warnings: string[];
+  requires_confirmation: boolean;
+  scan_summary: { files_seen: number; skipped: number; reasons: Record<string, number>; truncated: boolean };
+};
 type HierarchyNode = { name: string; files: string[]; folders: HierarchyNode[] };
 type Completion = { moved: number; kept_in_root: number; hierarchy: HierarchyNode };
+type FileEdit = { accepted: boolean; target_path: string; destination_name: string };
 type ApiRuntime = {
   state: "starting" | "ready" | "error";
   base_url?: string | null;
@@ -62,16 +86,19 @@ async function request<T>(apiBase: string, path: string, body?: unknown): Promis
 export default function App() {
   const [source, setSource] = useState("");
   const [recursive, setRecursive] = useState(false);
-  const [rename, setRename] = useState(false);
+  const [rename, setRename] = useState(true);
   const [reorganize, setReorganize] = useState(false);
+  const [allowSensitiveCloud, setAllowSensitiveCloud] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [selectedTargets, setSelectedTargets] = useState<Record<string, boolean>>({});
+  const [fileEdits, setFileEdits] = useState<Record<string, FileEdit>>({});
   const [busy, setBusy] = useState<"preview" | "apply" | "undo" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [undoAvailable, setUndoAvailable] = useState(false);
   const [completion, setCompletion] = useState<Completion | null>(null);
+  const [providerStudioOpen, setProviderStudioOpen] = useState(false);
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
   const [apiRuntime, setApiRuntime] = useState<ApiRuntime>(() => ({
     state: DESKTOP ? "starting" : "ready",
     base_url: DESKTOP ? null : BROWSER_API,
@@ -94,7 +121,7 @@ export default function App() {
         }
         setApiRuntime(status);
         if (status.state === "starting") {
-          timer = window.setTimeout(() => void poll(), 400);
+          timer = window.setTimeout(() => void poll(), 150);
         }
       } catch (caught) {
         if (!active) return;
@@ -116,14 +143,13 @@ export default function App() {
       grouped.set(file.target_path, [...(grouped.get(file.target_path) ?? []), file]);
     }
     return [...grouped.entries()];
-  }, [preview]);
-  const selectedCount = groups
-    .filter(([target]) => selectedTargets[target])
-    .reduce((total, [, files]) => total + files.length, 0);
+  }, [fileEdits, preview]);
+  const selectedCount = Object.values(fileEdits).filter((edit) => edit.accepted).length;
 
   function resetPreview() {
     setPreview(null);
-    setSelectedTargets({});
+    setFileEdits({});
+    setRiskAcknowledged(false);
   }
 
   async function chooseFolder() {
@@ -155,10 +181,20 @@ export default function App() {
     setMessage("");
     resetPreview();
     try {
-      const result = await request<Preview>(apiBase, "/api/preview", { source, recursive, rename, reorganize });
+      const result = await request<Preview>(apiBase, "/api/preview", {
+        source,
+        recursive,
+        rename,
+        reorganize,
+        allow_sensitive_cloud: allowSensitiveCloud,
+      });
       setPreview(result);
       setSource(result.source);
-      setSelectedTargets(Object.fromEntries(result.files.map((file) => [file.target_path, file.selected])));
+      setFileEdits(Object.fromEntries(result.files.map((file) => [file.id, {
+        accepted: file.selected,
+        target_path: file.target_path,
+        destination_name: file.destination_name,
+      }])));
       setCompletion(null);
       const cached = result.already_organized ? ` · ${result.already_organized} already organized skipped` : "";
       setMessage(result.files.length ? `Preview ready · ${result.files.length} files · ${result.analysis_seconds}s${cached}` : result.already_organized ? `${result.already_organized} files are already organized.` : "No eligible files found.");
@@ -170,17 +206,20 @@ export default function App() {
   }
 
   async function applyPlan() {
-    if (!preview || !apiReady) return;
+    if (!preview || !apiReady || (preview.requires_confirmation && !riskAcknowledged)) return;
     setConfirmOpen(false);
     setBusy("apply");
     setError("");
     try {
-      const selected_targets = Object.entries(selectedTargets)
-        .filter(([, selected]) => selected)
-        .map(([target]) => target);
       const result = await request<Completion>(apiBase, "/api/apply", {
         plan_id: preview.plan_id,
-        selected_targets,
+        risk_acknowledged: riskAcknowledged,
+        files: Object.entries(fileEdits).map(([id, edit]) => ({
+          id,
+          accepted: edit.accepted,
+          target_path: edit.target_path,
+          destination_name: edit.destination_name,
+        })),
       });
       setMessage("");
       setCompletion(result);
@@ -210,7 +249,15 @@ export default function App() {
   }
 
   function toggleTarget(target: string) {
-    setSelectedTargets((current) => ({ ...current, [target]: !current[target] }));
+    const files = groups.find(([name]) => name === target)?.[1] ?? [];
+    const allAccepted = files.every((file) => fileEdits[file.id]?.accepted);
+    setFileEdits((current) => {
+      const next = { ...current };
+      for (const file of files) {
+        next[file.id] = { ...next[file.id], accepted: !allAccepted };
+      }
+      return next;
+    });
   }
 
   async function openFolder() {
@@ -240,6 +287,9 @@ export default function App() {
         <div className="flex items-center gap-3 rounded-xl border border-violet-400/15 bg-violet-400/[0.09] px-3 py-3 text-sm text-violet-200">
           <FolderSearch size={17} /> Organize files
         </div>
+        <Button variant="ghost" className="mt-2 justify-start" onClick={() => setProviderStudioOpen(true)} disabled={!apiReady}>
+          <Settings2 size={17} /> Provider Studio
+        </Button>
         <Button variant="ghost" className="mt-2 justify-start" onClick={undo} disabled={!undoAvailable || busy !== null || !apiReady}>
           <RotateCcw size={17} /> Undo last move
         </Button>
@@ -294,6 +344,10 @@ export default function App() {
                   <input type="checkbox" checked={reorganize} onChange={(event) => { setReorganize(event.target.checked); resetPreview(); }} className="size-3.5 accent-violet-500" />
                   Reorganize already sorted files
                 </label>
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500">
+                  <input type="checkbox" checked={allowSensitiveCloud} onChange={(event) => { setAllowSensitiveCloud(event.target.checked); resetPreview(); }} className="size-3.5 accent-amber-500" />
+                  Allow redacted cloud analysis for suspected sensitive files
+                </label>
                 <div className="flex items-center gap-4">
                   <span className="hidden items-center gap-2 text-xs text-zinc-500 sm:flex"><ShieldCheck size={15} className="text-emerald-400" /> Preview only · No files moved</span>
                   <Button onClick={createPreview} disabled={busy !== null || !source.trim() || !apiReady}>
@@ -308,6 +362,10 @@ export default function App() {
               {message && <Notice tone="success" text={message} />}
               {error && <Notice tone="error" text={error} />}
               {apiRuntime.state === "error" && <Notice tone="error" text={`Local API unavailable. ${apiRuntime.detail ?? ""}`.trim()} />}
+              {preview && preview.scan_summary.skipped > 0 && (
+                <Notice tone="error" text={`${preview.scan_summary.skipped} files were skipped by scan safety limits${preview.scan_summary.truncated ? " and the file-count limit was reached" : ""}.`} />
+              )}
+              {preview?.plan_warnings.map((warning) => <Notice key={warning} tone="error" text={warning} />)}
             </AnimatePresence>
 
             <AnimatePresence>
@@ -334,12 +392,12 @@ export default function App() {
               {preview && preview.files.length > 0 && (
                 <motion.section initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-6 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#18181f]">
                   <div className="flex items-center justify-between border-b border-white/[0.07] p-5">
-                    <div><h2 className="font-medium">Proposed organization</h2><p className="mt-1 text-xs text-zinc-500">Turn off a target to keep every file in that group at the root.</p></div>
+                    <div><h2 className="font-medium">Proposed organization</h2><p className="mt-1 text-xs text-zinc-500">Review the evidence, then accept, edit, or reject each file. Group switches apply to every file in that target.</p></div>
                     <span className="rounded-full border border-white/10 px-2.5 py-1 text-xs text-zinc-400">{selectedCount} / {preview.files.length} selected</span>
                   </div>
                   <div className="divide-y divide-white/[0.05]">
                     {groups.map(([target, files]) => {
-                      const selected = selectedTargets[target];
+                      const selected = files.every((file) => fileEdits[file.id]?.accepted);
                       return <div key={target} className="p-5">
                         <div className="flex items-center justify-between gap-4">
                           <div className="flex min-w-0 items-center gap-3"><Folder size={17} className="shrink-0 text-violet-300" /><div className="min-w-0"><p className="truncate text-sm font-medium">{target}</p><p className="mt-0.5 text-xs text-zinc-500">{files.length} {files.length === 1 ? "file" : "files"}</p></div></div>
@@ -348,8 +406,15 @@ export default function App() {
                             <span className="sr-only">Toggle {target}</span>
                           </button>
                         </div>
-                        <div className="mt-4 space-y-2 border-l border-white/[0.08] pl-4">
-                          {files.map((file) => <div key={file.id} className="flex items-start gap-2 text-sm"><FileText size={14} className="mt-0.5 shrink-0 text-zinc-500" /><div className="min-w-0"><p className="truncate text-zinc-300">{file.renamed ? <><span className="text-zinc-600 line-through">{file.name}</span><span className="mx-1 text-violet-300">→</span>{file.destination_name}</> : file.name}</p><p className="mt-0.5 text-xs text-zinc-600">{file.reasoning}</p></div></div>)}
+                        <div className="mt-4 space-y-3 border-l border-white/[0.08] pl-4">
+                          {files.map((file) => (
+                            <FilePreviewRow
+                              key={file.id}
+                              file={file}
+                              edit={fileEdits[file.id]}
+                              onChange={(edit) => setFileEdits((current) => ({ ...current, [file.id]: edit }))}
+                            />
+                          ))}
                         </div>
                       </div>;
                     })}
@@ -378,13 +443,93 @@ export default function App() {
             <div className="grid size-11 place-items-center rounded-xl bg-violet-500/15 text-violet-300"><FolderOpen size={21} /></div>
             <Dialog.Title className="mt-4 text-lg font-semibold">Organize these files?</Dialog.Title>
             <Dialog.Description className="mt-2 text-sm leading-relaxed text-zinc-400">Sortly will move {selectedCount} selected files using the exact preview above. Unselected target groups stay in the source folder.</Dialog.Description>
+            {preview?.requires_confirmation && (
+              <label className="mt-4 flex items-start gap-2 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-3 text-xs text-amber-200">
+                <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} className="mt-0.5 accent-amber-400" />
+                <span>I reviewed the unusual plan warnings and want to continue. The plan has not been rewritten automatically.</span>
+              </label>
+            )}
             <div className="mt-6 flex gap-3">
               <Dialog.Close asChild><Button variant="secondary" className="flex-1">Cancel</Button></Dialog.Close>
-              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null || !apiReady}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
+              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null || !apiReady || Boolean(preview?.requires_confirmation && !riskAcknowledged)}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      {apiReady && (
+        <ProviderStudio
+          open={providerStudioOpen}
+          onOpenChange={setProviderStudioOpen}
+          apiBase={apiBase}
+        />
+      )}
+    </div>
+  );
+}
+
+function FilePreviewRow({ file, edit, onChange }: {
+  file: PlanItem;
+  edit: FileEdit | undefined;
+  onChange: (edit: FileEdit) => void;
+}) {
+  const current = edit ?? {
+    accepted: file.selected,
+    target_path: file.target_path,
+    destination_name: file.destination_name,
+  };
+  const confidenceClass = file.confidence === "high"
+    ? "border-emerald-400/20 text-emerald-300"
+    : file.confidence === "medium"
+      ? "border-amber-400/20 text-amber-300"
+      : "border-zinc-500/20 text-zinc-400";
+  return (
+    <div data-file-id={file.id} className={`rounded-xl border p-3 ${current.accepted ? "border-white/[0.08] bg-black/20" : "border-white/[0.04] bg-black/10 opacity-60"}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <label className="flex min-w-0 items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={current.accepted}
+            onChange={(event) => onChange({ ...current, accepted: event.target.checked })}
+            className="mt-0.5 accent-violet-500"
+          />
+          <span className="min-w-0">
+            <span className="block truncate text-zinc-200">{file.name}</span>
+            <span className="mt-0.5 block text-xs text-zinc-600">{file.evidence_sufficient ? "Move and rename may be applied together" : "Evidence is limited; keeping the original name is safer"}</span>
+          </span>
+        </label>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] ${confidenceClass}`}>{file.confidence} confidence</span>
+      </div>
+
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <label className="text-[11px] text-zinc-500">Destination folder
+          <input
+            value={current.target_path}
+            onChange={(event) => onChange({ ...current, target_path: event.target.value })}
+            disabled={!current.accepted}
+            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-violet-400/50 disabled:opacity-50"
+          />
+        </label>
+        <label className="text-[11px] text-zinc-500">Filename
+          <input
+            value={current.destination_name}
+            onChange={(event) => onChange({ ...current, destination_name: event.target.value })}
+            disabled={!current.accepted}
+            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-violet-400/50 disabled:opacity-50"
+          />
+        </label>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
+        <span className="break-all">Current: {file.current_path}</span>
+        {file.sensitive && <span className="font-medium text-amber-300">Possible sensitive content · cloud disabled by default</span>}
+        <span>{file.detected_type !== "unknown" ? `Detected: ${file.detected_type}` : "Type signature unavailable"}</span>
+        {file.evidence_sources.length > 0 && <span>Evidence: {file.evidence_sources.join(", ")}</span>}
+        {file.filename_conflict !== "none" && <span className="text-amber-300">Filename conflict: {file.filename_conflict.replace("_", " ")}</span>}
+      </div>
+      <p className="mt-2 text-xs text-zinc-400">{file.reasoning}</p>
+      {file.evidence_excerpt && <p className="mt-1 line-clamp-3 text-xs italic text-zinc-600">“{file.evidence_excerpt}”</p>}
+      {file.rename_reason && <p className="mt-1 text-xs text-violet-300">{file.rename_reason}</p>}
+      {file.warnings.map((warning) => <p key={warning} className="mt-1 text-xs text-amber-300">{warning}</p>)}
     </div>
   );
 }

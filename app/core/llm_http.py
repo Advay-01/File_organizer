@@ -48,6 +48,20 @@ PROVIDERS: Dict[str, dict] = {
     "groq": {"base": "https://api.groq.com/openai/v1", "keys": ("GROQ_API_KEY",), "params": {}, "json_mode": True},
     "openrouter": {"base": "https://openrouter.ai/api/v1", "keys": ("OPENROUTER_API_KEY",), "params": {}, "json_mode": False},
     "ollama": {"base": "http://localhost:11434/v1", "keys": (), "params": {}, "json_mode": True},
+    "anthropic": {
+        "base": "https://api.anthropic.com",
+        "keys": ("ANTHROPIC_API_KEY",),
+        "params": {},
+        "json_mode": False,
+        "protocol": "anthropic",
+    },
+    "huggingface": {
+        "base": "https://router.huggingface.co/v1",
+        "keys": ("HUGGINGFACE_API_KEY", "HF_TOKEN"),
+        "params": {},
+        "json_mode": False,
+        "protocol": "huggingface",
+    },
 }
 
 
@@ -82,23 +96,125 @@ def build_params(prov: str, user_params: Optional[dict]) -> dict:
     return {k: v for k, v in p.items() if v is not None}
 
 
-def build_request(model: str, messages: List[dict], user_params: Optional[dict] = None):
+def _api_key(prov: str) -> Optional[str]:
+    names = PROVIDERS[prov]["keys"]
+    key = next((os.getenv(name) for name in names if os.getenv(name)), None)
+    return key.strip() if key else None
+
+
+def _anthropic_request(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict],
+    extra_body: Optional[dict],
+):
+    prov, name = split_model(model)
+    key = _api_key(prov)
+    if not key:
+        raise LLMHTTPError("ANTHROPIC_API_KEY is not set (needed for Anthropic).", 401)
+    system_parts = [
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    conversation = [
+        {"role": message.get("role", "user"), "content": message.get("content", "")}
+        for message in messages
+        if message.get("role") != "system"
+    ]
+    extra_body = extra_body or {}
+    body = {
+        "model": name,
+        "max_tokens": int(extra_body.get("max_tokens", 4096)),
+        "temperature": 0,
+        "messages": conversation,
+    }
+    if system_parts:
+        body["system"] = "\n\n".join(system_parts)
+    body.update(build_params(prov, user_params))
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+    }
+    return f"{_base_url(prov)}/v1/messages", headers, json.dumps(body).encode(), "anthropic"
+
+
+def _huggingface_request(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict],
+    extra_body: Optional[dict],
+):
+    prov, name = split_model(model)
+    key = _api_key(prov)
+    if not key:
+        raise LLMHTTPError("HUGGINGFACE_API_KEY is not set (needed for Hugging Face).", 401)
+    base_url = _base_url(prov)
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    extra_body = extra_body or {}
+    if "/models/" in base_url:
+        prompt = "\n\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        body = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": int(extra_body.get("max_tokens", 1024)),
+                "temperature": 0,
+                "return_full_text": False,
+            },
+        }
+        body.update(build_params(prov, user_params))
+        return base_url, headers, json.dumps(body).encode(), "huggingface-text"
+
+    body = {"model": name, "messages": messages, "temperature": 0, "stream": False}
+    body.update(extra_body)
+    body.update(build_params(prov, user_params))
+    return f"{base_url}/chat/completions", headers, json.dumps(body).encode(), "openai"
+
+
+def build_request(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict] = None,
+    extra_body: Optional[dict] = None,
+):
     prov, name = split_model(model)
     spec = PROVIDERS[prov]
+    if spec.get("protocol") == "anthropic":
+        url, headers, data, _protocol = _anthropic_request(
+            model, messages, user_params, extra_body
+        )
+        return url, headers, data
+    if spec.get("protocol") == "huggingface":
+        url, headers, data, _protocol = _huggingface_request(
+            model, messages, user_params, extra_body
+        )
+        return url, headers, data
     headers = {"Content-Type": "application/json"}
     if spec["keys"]:
-        key = next((os.getenv(k) for k in spec["keys"] if os.getenv(k)), None)
+        key = _api_key(prov)
         if not key:
             raise LLMHTTPError(f"{spec['keys'][0]} is not set (needed for {model})", 401)
-        headers["Authorization"] = f"Bearer {key.strip()}"
+        headers["Authorization"] = f"Bearer {key}"
     body = {"model": name, "messages": messages, "temperature": 0, "stream": False}
     if spec["json_mode"]:
         body["response_format"] = {"type": "json_object"}
+    body.update(extra_body or {})
     body.update(build_params(prov, user_params))
     return f"{_base_url(prov)}/chat/completions", headers, json.dumps(body).encode()
 
 
-def _post(url: str, headers: dict, data: bytes, timeout: float, label: str) -> str:
+def _post(
+    url: str,
+    headers: dict,
+    data: bytes,
+    timeout: float,
+    label: str,
+    protocol: str = "openai",
+) -> str:
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -113,6 +229,33 @@ def _post(url: str, headers: dict, data: bytes, timeout: float, label: str) -> s
         raise LLMHTTPError(f"cannot connect to {label} ({reason})", 404) from None  # dead for now
     except (socket.timeout, TimeoutError):
         raise LLMHTTPError(f"{label} timed out", None) from None
+    if protocol == "anthropic":
+        try:
+            content = payload["content"]
+            text = "".join(
+                str(block.get("text", ""))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if not text:
+                raise ValueError
+            return text
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                f"{label}: unexpected Anthropic response shape: {str(payload)[:300]}"
+            ) from None
+    if protocol == "huggingface-text":
+        try:
+            first = payload[0] if isinstance(payload, list) else payload
+            if isinstance(first, dict) and first.get("generated_text") is not None:
+                return str(first["generated_text"])
+            if isinstance(first, str):
+                return first
+        except (IndexError, TypeError):
+            pass
+        raise ValueError(
+            f"{label}: endpoint returned no compatible text-generation result: {str(payload)[:300]}"
+        )
     try:
         return payload["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
@@ -145,8 +288,64 @@ async def _in_daemon_thread(fn, *args):
     return await fut
 
 
-async def direct_call(model: str, messages: List[dict], user_params: Optional[dict] = None,
-                      timeout: float = 90.0) -> str:
-    url, headers, data = build_request(model, messages, user_params)
-    return await _in_daemon_thread(_post, url, headers, data, timeout, model.split("/")[0])
+def _request_target(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict],
+    extra_body: Optional[dict],
+):
+    prov, _name = split_model(model)
+    spec = PROVIDERS[prov]
+    if spec.get("protocol") == "anthropic":
+        return _anthropic_request(model, messages, user_params, extra_body)
+    if spec.get("protocol") == "huggingface":
+        return _huggingface_request(model, messages, user_params, extra_body)
+    url, headers, data = build_request(model, messages, user_params, extra_body)
+    return url, headers, data, "openai"
+
+
+async def direct_call(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict] = None,
+    timeout: float = 90.0,
+    extra_body: Optional[dict] = None,
+) -> str:
+    url, headers, data, protocol = _request_target(model, messages, user_params, extra_body)
+    if protocol == "openai":
+        return await _in_daemon_thread(
+            _post,
+            url,
+            headers,
+            data,
+            timeout,
+            model.split("/")[0],
+        )
+    return await _in_daemon_thread(
+        _post,
+        url,
+        headers,
+        data,
+        timeout,
+        model.split("/")[0],
+        protocol,
+    )
+
+
+def direct_call_sync(
+    model: str,
+    messages: List[dict],
+    user_params: Optional[dict] = None,
+    timeout: float = 90.0,
+    extra_body: Optional[dict] = None,
+) -> str:
+    return asyncio.run(
+        direct_call(
+            model,
+            messages,
+            user_params=user_params,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+    )
 

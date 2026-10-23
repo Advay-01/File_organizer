@@ -4,24 +4,37 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 use uuid::Uuid;
 
-const SIDECAR_NAME: &str = "sortly-api";
+const SIDECAR_RELATIVE_PATH: &str = "binaries/sortly-api/sortly-api.exe";
 const SHUTDOWN_TOKEN_ENV: &str = "SORTLY_SHUTDOWN_TOKEN";
 const MAX_PORT_ATTEMPTS: u8 = 6;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(75);
+
+#[derive(Clone, Serialize)]
+struct StartupTimings {
+    process_spawn_ms: u64,
+    api_ready_ms: u64,
+}
 
 #[derive(Clone, Serialize)]
 struct ApiStatus {
     state: String,
     base_url: Option<String>,
     detail: Option<String>,
+    timing: Option<StartupTimings>,
 }
 
 struct SidecarRuntime {
@@ -41,6 +54,7 @@ impl Default for SidecarState {
                 state: "starting".into(),
                 base_url: None,
                 detail: None,
+                timing: None,
             },
             child: None,
             shutdown_token: None,
@@ -106,6 +120,20 @@ fn sidecar_healthy(port: u16) -> bool {
         .unwrap_or(false)
 }
 
+fn wait_until_healthy(port: u16, timeout: Duration, terminated: &AtomicBool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if terminated.load(Ordering::Acquire) {
+            return false;
+        }
+        if sidecar_healthy(port) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 fn sidecar_environment(app: &AppHandle) -> Result<(PathBuf, Option<PathBuf>), String> {
     let config_dir = app
         .path()
@@ -137,7 +165,35 @@ fn sidecar_environment(app: &AppHandle) -> Result<(PathBuf, Option<PathBuf>), St
     Ok((data_dir, env_file))
 }
 
+fn sidecar_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let resource_path = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not resolve the application resource directory: {error}"))?
+        .join(SIDECAR_RELATIVE_PATH);
+    if resource_path.is_file() {
+        return Ok(resource_path);
+    }
+
+    let executable_path = std::env::current_exe()
+        .map_err(|error| format!("Could not resolve the desktop executable: {error}"))?
+        .parent()
+        .map(|directory| directory.join(SIDECAR_RELATIVE_PATH))
+        .filter(|path| path.is_file());
+    executable_path.ok_or_else(|| {
+        format!(
+            "Bundled local service not found at {}",
+            resource_path.display()
+        )
+    })
+}
+
 fn start_sidecar(handle: AppHandle) {
+    let started = Instant::now();
+    let diagnostics = std::env::var_os("SORTLY_STARTUP_DIAGNOSTICS").is_some();
+    if diagnostics {
+        eprintln!("[startup +0ms] Rust sidecar worker started");
+    }
     let (data_dir, env_file) = match sidecar_environment(&handle) {
         Ok(value) => value,
         Err(error) => {
@@ -147,6 +203,7 @@ fn start_sidecar(handle: AppHandle) {
                     state: "error".into(),
                     base_url: None,
                     detail: Some(error),
+                    timing: None,
                 },
             );
             return;
@@ -171,6 +228,7 @@ fn start_sidecar(handle: AppHandle) {
                         state: "error".into(),
                         base_url: None,
                         detail: Some(error),
+                        timing: None,
                     },
                 );
                 return;
@@ -179,21 +237,24 @@ fn start_sidecar(handle: AppHandle) {
         let token = Uuid::new_v4().simple().to_string();
         let port_text = port.to_string();
         let cache_db = data_dir.join("cache.db");
-        let mut command = match handle.shell().sidecar(SIDECAR_NAME) {
-            Ok(command) => command,
+        let sidecar_path = match sidecar_executable(&handle) {
+            Ok(path) => path,
             Err(error) => {
                 set_status(
                     &handle,
                     ApiStatus {
                         state: "error".into(),
                         base_url: None,
-                        detail: Some(format!("Could not prepare the local service: {error}")),
+                        detail: Some(error),
+                        timing: None,
                     },
                 );
                 return;
             }
         };
-        command = command
+        let mut command = handle
+            .shell()
+            .command(sidecar_path.as_os_str())
             .set_process_group(true)
             .args(["--port", port_text.as_str(), "--log-level", "warning"])
             .env(SHUTDOWN_TOKEN_ENV, token.clone())
@@ -213,13 +274,26 @@ fn start_sidecar(handle: AppHandle) {
                             state: "error".into(),
                             base_url: None,
                             detail: Some(format!("Could not launch the local service: {error}")),
+                            timing: None,
                         },
                     );
                 }
                 continue;
             }
         };
-        tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
+        let terminated = Arc::new(AtomicBool::new(false));
+        let terminated_for_events = Arc::clone(&terminated);
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(event, CommandEvent::Terminated(_)) {
+                    terminated_for_events.store(true, Ordering::Release);
+                }
+            }
+        });
+        let spawn_ms = started.elapsed().as_millis() as u64;
+        if diagnostics {
+            eprintln!("[startup +{spawn_ms}ms] sidecar process spawned");
+        }
 
         set_status(
             &handle,
@@ -229,32 +303,37 @@ fn start_sidecar(handle: AppHandle) {
                 detail: Some(format!(
                     "Starting local service (attempt {attempt}/{MAX_PORT_ATTEMPTS})"
                 )),
+                timing: None,
             },
         );
 
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        while Instant::now() < deadline {
-            if sidecar_healthy(port) {
-                let base_url = format!("http://127.0.0.1:{port}");
-                if let Some(state) = handle.try_state::<SidecarState>() {
-                    let mut runtime = state.0.lock().unwrap();
-                    if runtime.stopping {
-                        drop(runtime);
-                        let _ = child.kill();
-                        return;
-                    }
-                    runtime.child = Some(child);
-                    runtime.shutdown_token = Some(token);
-                    runtime.port = Some(port);
-                    runtime.status = ApiStatus {
-                        state: "ready".into(),
-                        base_url: Some(base_url.clone()),
-                        detail: None,
-                    };
-                }
-                return;
+        if wait_until_healthy(port, STARTUP_TIMEOUT, &terminated) {
+            let ready_ms = started.elapsed().as_millis() as u64;
+            let base_url = format!("http://127.0.0.1:{port}");
+            if diagnostics {
+                eprintln!("[startup +{ready_ms}ms] API health succeeded on port {port}");
             }
-            thread::sleep(Duration::from_millis(250));
+            if let Some(state) = handle.try_state::<SidecarState>() {
+                let mut runtime = state.0.lock().unwrap();
+                if runtime.stopping {
+                    drop(runtime);
+                    let _ = child.kill();
+                    return;
+                }
+                runtime.child = Some(child);
+                runtime.shutdown_token = Some(token);
+                runtime.port = Some(port);
+                runtime.status = ApiStatus {
+                    state: "ready".into(),
+                    base_url: Some(base_url.clone()),
+                    detail: None,
+                    timing: Some(StartupTimings {
+                        process_spawn_ms: spawn_ms,
+                        api_ready_ms: ready_ms,
+                    }),
+                };
+            }
+            return;
         }
 
         let _ = child.kill();
@@ -266,6 +345,7 @@ fn start_sidecar(handle: AppHandle) {
             state: "error".into(),
             base_url: None,
             detail: Some("The local service could not bind to a free loopback port.".into()),
+            timing: None,
         },
     );
 }
@@ -336,4 +416,60 @@ pub fn run() {
             shutdown_sidecar(handle);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
+    use std::thread;
+
+    fn delayed_http_server(delay: Duration) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            thread::sleep(delay);
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+        });
+        port
+    }
+
+    #[test]
+    fn health_wait_succeeds_when_api_becomes_ready() {
+        let port = delayed_http_server(Duration::from_millis(200));
+        assert!(wait_until_healthy(
+            port,
+            Duration::from_secs(2),
+            &AtomicBool::new(false)
+        ));
+    }
+
+    #[test]
+    fn health_wait_fails_when_api_never_starts() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(!wait_until_healthy(
+            port,
+            Duration::from_millis(300),
+            &AtomicBool::new(false)
+        ));
+    }
+
+    #[test]
+    fn health_wait_stops_if_sidecar_terminates() {
+        let port = delayed_http_server(Duration::ZERO);
+        assert!(!wait_until_healthy(
+            port,
+            Duration::from_secs(2),
+            &AtomicBool::new(true)
+        ));
+    }
 }

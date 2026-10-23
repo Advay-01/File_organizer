@@ -6,6 +6,7 @@ Image files contribute their format, dimensions, and available EXIF description.
 from __future__ import annotations
 
 import gzip
+import os
 import tarfile
 import re
 import zipfile
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import List
 
 from app.models.schemas import FileInfo
+
+def _archive_entry_limit() -> int:
+    return max(1, int(os.getenv("ORGANIZER_MAX_ARCHIVE_ENTRIES", "1000")))
 
 TEXT_EXTS = {
     ".txt", ".md", ".rst", ".csv", ".json", ".yaml", ".yml", ".toml", ".ini", ".log",
@@ -114,13 +118,18 @@ def _read_epub(path: Path, max_chars: int) -> str:
 def _read_zip_members(path: Path) -> str:
     with zipfile.ZipFile(path) as archive:
         names = [item.filename for item in archive.infolist() if not item.is_dir()]
-    return "Archive contents: " + ", ".join(names[:50])
+    return "Archive contents: " + ", ".join(names[: _archive_entry_limit()])
 
 
 def _read_tar_members(path: Path) -> str:
+    names = []
     with tarfile.open(path, mode="r:*") as archive:
-        names = [item.name for item in archive.getmembers() if item.isfile()]
-    return "Archive contents: " + ", ".join(names[:50])
+        for index, item in enumerate(archive):
+            if item.isfile():
+                names.append(item.name)
+            if index + 1 >= _archive_entry_limit():
+                break
+    return "Archive contents: " + ", ".join(names)
 
 
 def _read_gzip(path: Path, max_chars: int) -> str:
@@ -133,7 +142,7 @@ def _read_rar_members(path: Path) -> str:
 
     with rarfile.RarFile(path) as archive:
         names = [item.filename for item in archive.infolist() if not item.is_dir()]
-    return "Archive contents: " + ", ".join(names[:50])
+    return "Archive contents: " + ", ".join(names[: _archive_entry_limit()])
 
 
 def _read_image_metadata(path: Path) -> str:

@@ -81,7 +81,12 @@ def main(argv=None) -> int:
         return 1
 
     print(f"\n{'APPLYING' if args.apply else 'DRY RUN (nothing will move; pass --apply)'}:")
-    done = execute_plan(moves, out_root, dry_run=not args.apply)
+    done = execute_plan(
+        moves,
+        out_root,
+        dry_run=not args.apply,
+        source_root=args.source,
+    )
     if args.apply:
         print(f"\nMoved {len(done)} file(s). Undo with: python -m app.main {out_root} --undo")
     return 0

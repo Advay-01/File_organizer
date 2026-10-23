@@ -109,6 +109,22 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(victim.exists() and not (self.root / "stolen.txt").exists())
         outside.cleanup()
 
+    def test_tampered_log_cannot_restore_to_source_outside_output_folder(self):
+        outside = tempfile.TemporaryDirectory()
+        escaped = Path(outside.name) / "escaped.txt"
+        moved = self.root / "AI" / "stolen.txt"
+        moved.parent.mkdir()
+        moved.write_text("keep me in the approved folder")
+        log = [{"time": "t", "moves": [{"src": str(escaped), "dest": str(moved)}]}]
+        (self.root / history.UNDO_LOG).write_text(json.dumps(log))
+
+        res = history.undo_run(str(self.root), 0)
+
+        self.assertEqual(res["restored"], 0)
+        self.assertFalse(escaped.exists())
+        self.assertTrue(moved.exists())
+        outside.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

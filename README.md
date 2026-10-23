@@ -80,9 +80,66 @@ NSIS tools under `src-tauri/target`. Provider credentials are never bundled. For
 a packaged build, place `sortly.env` in the Tauri application configuration
 directory or set `SORTLY_ENV_FILE` to an external environment file before launch.
 
+### Provider Studio
+
+Open **Provider Studio** in the desktop app to choose the provider and editable
+model ID used by Analyze. API keys are write-only in the UI, encrypted with
+Windows DPAPI in the app data directory, and never returned to the frontend.
+
+- Use **Refresh models** to retrieve IDs from the selected provider when its API
+  supports model discovery. A discovered ID is not treated as verified until
+  **Test active configuration** completes a real model request.
+- Fallback providers are optional. Add them explicitly and order them in the
+  dialog; no provider is selected silently.
+- Ollama uses no API key. Start it with `ollama serve`, then refresh models.
+- Hugging Face defaults to its OpenAI-compatible router. Enter a full legacy
+  `/models/<repository>` endpoint to use text-generation inference instead.
+- Environment variables in `.env` remain supported when a Provider Studio key
+  has not been stored for that provider.
+
 ## How it works
 `scanner` (file facts) -> `extractor` (text snippet from txt/code/PDF/DOCX) -> `planner` (batches files to the LLM, validates output) -> `executor` (dry run / move / undo log).
 `classifier` wraps litellm so one code path serves every provider, with model fallback and JSON repair.
+
+### Content Intelligence
+
+The React desktop workflow uses a content-first preview:
+
+1. Files are content-fingerprinted and text/metadata evidence is extracted.
+2. Common file signatures are compared with extensions.
+3. The active Provider Studio configuration classifies bounded batches and proposes
+   grounded filenames.
+4. Code verifies every evidence phrase against extracted content/metadata and caps
+   confidence when evidence is weak.
+5. Each file can be accepted, rejected, re-categorized, or renamed independently
+   before one confirmed move/rename operation.
+
+Evidence extraction and analysis results are cached separately. Extraction is keyed
+by a full content hash, so renames reuse extraction while changed content cannot
+reuse stale analysis. Analysis keys also include the selected models, known folder
+set, custom endpoints, rename mode, and cache format version.
+
+OCR is optional: image OCR runs only when both `pytesseract` and the external
+Tesseract executable are available. They are not bundled or currently installed,
+so image OCR and OCR for scanned PDFs must be treated as unavailable in this build.
+Audio/video tag extraction also remains unsupported because no media-tag runtime is
+installed.
+
+### Guarded scanning and sensitive content
+
+Desktop scans reject protected roots and detected project roots, skip `.git`,
+`node_modules`, reparse points/junctions, hidden or system files, partial-download
+names, files above the configured size, and files modified within the configured
+recent-file window. Archive listings are bounded; archives are never extracted.
+
+Likely Aadhaar, PAN, payment-card, API-key, private-key, and financial-document
+content is detected locally. Detection is heuristic and can produce false positives
+or false negatives. Suspected sensitive files are kept unselected by default, never
+go to cloud models unless explicitly enabled, and are redacted before any permitted
+model request. Their raw evidence is not persisted in the content cache.
+
+Unusual plans with excessive folders, concentrated destinations, or excessive
+`Misc` assignments display warnings and require an additional confirmation.
 
 ## Recognized file types
 The organizer scans all normal files. It can give the model content or metadata from:

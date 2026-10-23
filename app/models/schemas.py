@@ -1,9 +1,9 @@
 """Data shapes shared across the organizer."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FileInfo(BaseModel):
@@ -15,6 +15,7 @@ class FileInfo(BaseModel):
     size_kb: float
     date_created: str
     snippet: str = ""
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SortingAction(BaseModel):
@@ -37,3 +38,25 @@ class SortingAction(BaseModel):
 
 class OrganizerResponse(BaseModel):
     actions: List[SortingAction]
+
+
+class ContentIntelligenceAction(BaseModel):
+    """Strict response item from the content-intelligence model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(ge=0)
+    category: str = Field(min_length=1, max_length=80)
+    subcategory: str = Field(min_length=1, max_length=80)
+    confidence: Literal["high", "medium", "low", "insufficient"]
+    reasoning: str = Field(default="", max_length=1000)
+    evidence_quote: str = Field(default="", max_length=500)
+    filename_conflict: Literal["none", "generic", "misleading", "extension_mismatch"] = "none"
+    suggested_name: str = Field(default="", max_length=200)
+    name_evidence: str = Field(default="", max_length=500)
+
+
+class ContentIntelligenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    files: List[ContentIntelligenceAction]

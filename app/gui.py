@@ -180,7 +180,14 @@ class OrganizerApp(tk.Tk):
             self.status_var.set("Organization cancelled. The preview is still available to review.")
             return
         self._set_busy(True, "Organizing files…")
-        self._run_in_background(lambda: execute_plan(self.plan, str(self.plan_root), dry_run=False))
+        self._run_in_background(
+            lambda: execute_plan(
+                self.plan,
+                str(self.plan_root),
+                dry_run=False,
+                source_root=str(self.plan_root),
+            )
+        )
 
     def _run_in_background(self, work: Callable[[], object]) -> None:
         def runner() -> None:

@@ -29,10 +29,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
-    name="sortly-api-x86_64-pc-windows-msvc",
+    exclude_binaries=True,
+    name="sortly-api",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -43,4 +42,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="sortly-api",
 )

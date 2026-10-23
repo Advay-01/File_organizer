@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from app.core.safety import (
+    UnsafePathError,
+    move_file_no_overwrite,
+    validate_move_paths,
+)
 
 UNDO_LOG = ".organizer_undo.json"
 SAMPLE_SIZE = 5
@@ -153,8 +158,12 @@ def undo_run(output_root: str, run_id: int) -> Dict[str, object]:
             skipped.append({"file": dest.name, "reason": "original location is already occupied"})
         else:
             try:
+                validate_move_paths(dest, src, Path(output_root), Path(output_root))
                 src.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dest), str(src))
+                move_file_no_overwrite(dest, src)
+            except UnsafePathError as error:
+                skipped.append({"file": dest.name, "reason": f"unsafe path: {error}"})
+                continue
             except OSError as e:
                 skipped.append({"file": dest.name, "reason": f"error: {e}"})
                 continue
