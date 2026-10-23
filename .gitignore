@@ -1,10 +1,13 @@
 .idea/
 .venv/
+.pyinstaller-venv/
 __pycache__/
 *.pyc
 .env
 *.db
 .pytest_cache/
+build/
+dist/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
