@@ -11,7 +11,7 @@ import { Button } from "./ui/button";
  *   <HistoryPanel />                                 // runs from every folder organized so far
  */
 
-type Status = "applied" | "undone" | "partially undone";
+type Status = "applied" | "partial" | "failed" | "applying" | "undone" | "partially undone";
 
 interface Run {
   id: number;
@@ -53,6 +53,9 @@ const MAX_MOVES_SHOWN = 100;
 
 const STATUS_LABELS: Record<Status, string> = {
   applied: "Completed",
+  partial: "Partially applied",
+  failed: "Failed",
+  applying: "Interrupted",
   undone: "Undone",
   "partially undone": "Partially undone",
 };

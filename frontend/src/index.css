@@ -1624,6 +1624,19 @@ button:disabled {
     background: var(--warning-soft);
   }
 
+  .history-status[data-status="partial"],
+  .history-status[data-status="applying"] {
+    border-color: color-mix(in srgb, var(--warning) 32%, transparent);
+    color: var(--warning);
+    background: var(--warning-soft);
+  }
+
+  .history-status[data-status="failed"] {
+    border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+    color: var(--danger);
+    background: var(--danger-soft);
+  }
+
   .history-status[data-status="undone"] {
     color: var(--text-muted);
     background: var(--surface-inset);

@@ -2,6 +2,18 @@ function statusLabel(response: Response) {
   return `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
 }
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 function errorDetail(payload: unknown): string | null {
   if (!payload || typeof payload !== "object" || !("detail" in payload)) return null;
   const detail = (payload as { detail?: unknown }).detail;
@@ -38,7 +50,11 @@ export async function parseJsonResponse<T>(
 
   if (!response.ok) {
     const detail = hasJson ? errorDetail(payload) : null;
-    throw new Error(detail ?? `${fallbackMessage} (${statusLabel(response)})`);
+    throw new ApiError(
+      detail ?? `${fallbackMessage} (${statusLabel(response)})`,
+      response.status,
+      payload,
+    );
   }
 
   if (!hasJson) {
@@ -53,5 +69,13 @@ export async function fetchJson<T>(
   init: RequestInit | undefined,
   fallbackMessage: string,
 ): Promise<T> {
-  return parseJsonResponse<T>(await fetch(url, init), fallbackMessage);
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch {
+    throw new Error(
+      "Could not reach the local Sortly service. Check History before trying again; do not repeat the Apply operation.",
+    );
+  }
+  return parseJsonResponse<T>(response, fallbackMessage);
 }

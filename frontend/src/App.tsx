@@ -34,7 +34,7 @@ import HistoryPanel from "./components/HistoryPanel";
 import ProviderStudio from "./components/ProviderStudio";
 import { Button } from "./components/ui/button";
 import sortlyMark from "./assets/sortly-mark.svg";
-import { fetchJson } from "./lib/api";
+import { ApiError, fetchJson } from "./lib/api";
 import {
   describeSkips,
   filterReviewGroups,
@@ -135,8 +135,19 @@ type Preview = {
   scan_summary: { files_seen: number; skipped: number; reasons: Record<string, number>; truncated: boolean };
 };
 type HierarchyNode = { name: string; files: string[]; folders: HierarchyNode[] };
-type ApplyResult = { moved: number; kept_in_root: number; hierarchy: HierarchyNode };
-type Completion = ApplyResult & { requested: number };
+type ApplyFailure = { file: string; reason: string };
+type ApplyResult = {
+  status: "success" | "partial" | "failed";
+  moved: number;
+  requested: number;
+  failed: number;
+  failures: ApplyFailure[];
+  undo_available: boolean;
+  kept_in_root: number;
+  hierarchy: HierarchyNode;
+  detail?: string;
+};
+type Completion = ApplyResult;
 type FileEdit = { accepted: boolean; target_path: string; destination_name: string };
 type ApiRuntime = {
   state: "starting" | "ready" | "error";
@@ -393,11 +404,38 @@ export default function App() {
         })),
       });
       setMessage("");
-      setCompletion({ ...result, requested: selectedCount });
-      setUndoAvailable(result.moved > 0);
+      setCompletion(result);
+      setUndoAvailable(result.undo_available && result.moved > 0);
       resetPreview();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not organize the selected files.");
+      const message = caught instanceof Error ? caught.message : "Could not organize the selected files.";
+      if (caught instanceof ApiError && caught.payload && typeof caught.payload === "object") {
+        const payload = caught.payload as Partial<ApplyResult>;
+        if (typeof payload.moved === "number" && payload.moved > 0) {
+          const requested = typeof payload.requested === "number" ? payload.requested : selectedCount;
+          setCompletion({
+            status: "partial",
+            moved: payload.moved,
+            requested,
+            failed: typeof payload.failed === "number" ? payload.failed : Math.max(requested - payload.moved, 0),
+            failures: Array.isArray(payload.failures) ? payload.failures : [],
+            undo_available: Boolean(payload.undo_available),
+            kept_in_root: typeof payload.kept_in_root === "number" ? payload.kept_in_root : 0,
+            hierarchy: payload.hierarchy ?? { name: "Source", files: [], folders: [] },
+            detail: payload.detail,
+          });
+          setUndoAvailable(Boolean(payload.undo_available));
+        } else {
+          setUndoAvailable(false);
+        }
+      } else {
+        // A dropped connection leaves the filesystem outcome unknown. Keep Undo
+        // reachable, but remove the preview so this destructive request cannot
+        // be repeated accidentally.
+        setUndoAvailable(true);
+      }
+      setError(message);
+      resetPreview();
     } finally {
       setBusy(null);
     }
@@ -1039,7 +1077,7 @@ function CompletionSummary({
 }) {
   const reducedMotion = useReducedMotion();
   const notReported = Math.max(completion.requested - completion.moved, 0);
-  const complete = notReported === 0;
+  const complete = completion.status === "success" && notReported === 0;
   const movedNothing = completion.moved === 0;
   const StatusIcon = complete ? Check : movedNothing ? X : AlertTriangle;
   const toneClass = complete ? "success" : movedNothing ? "danger" : "warning";
@@ -1068,7 +1106,7 @@ function CompletionSummary({
           <p className="mt-2 max-w-2xl text-sm text-ink-soft">
             {complete
               ? "Every selected file was reported as moved by the local service."
-              : `${notReported} selected ${notReported === 1 ? "file was" : "files were"} not reported as moved. The current API does not provide individual failure reasons.`}
+              : `${completion.failed || notReported} selected ${(completion.failed || notReported) === 1 ? "file was" : "files were"} not moved. Review the safe failure summary before creating a new preview.`}
           </p>
         </div>
       </div>
@@ -1076,9 +1114,24 @@ function CompletionSummary({
       <div className="completion-metrics">
         <div className="summary-metric"><span className="summary-label">Requested</span><strong>{completion.requested}</strong></div>
         <div className="summary-metric" data-tone="success"><span className="summary-label">Moved</span><strong>{completion.moved}</strong></div>
-        {notReported > 0 && <div className="summary-metric" data-tone="warning"><span className="summary-label">Not reported moved</span><strong>{notReported}</strong></div>}
+        {(completion.failed > 0 || notReported > 0) && <div className="summary-metric" data-tone="warning"><span className="summary-label">Not moved</span><strong>{completion.failed || notReported}</strong></div>}
         <div className="summary-metric"><span className="summary-label">Kept in source</span><strong>{completion.kept_in_root}</strong></div>
       </div>
+
+      {completion.failures.length > 0 && (
+        <div className="border-t border-warning/20 bg-warning-soft px-6 py-4">
+          <div className="ui-eyebrow mb-2 text-warning">Files not moved</div>
+          <ul className="space-y-1 text-sm text-ink-soft">
+            {completion.failures.map((failure) => (
+              <li key={`${failure.file}-${failure.reason}`}><strong className="font-medium text-ink">{failure.file}</strong>: {failure.reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {completion.detail && !complete && (
+        <div className="border-t border-warning/20 px-6 py-3 text-sm text-warning">{completion.detail}</div>
+      )}
 
       {completion.moved > 0 && (
         <div className="p-6">

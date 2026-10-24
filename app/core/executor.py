@@ -1,16 +1,62 @@
 """Apply a plan to disk, with dry-run and an undo log."""
 from __future__ import annotations
 
-import json
-import os
+import logging
+import errno
 from datetime import datetime
 from pathlib import Path
 from typing import List
+from uuid import uuid4
 
+from app.core.history import (
+    UndoLogError,
+    load_history_for_update,
+    write_history,
+)
 from app.core.planner import Move
 from app.core.safety import UnsafePathError, move_file_no_overwrite, validate_move_paths
 
-UNDO_LOG = ".organizer_undo.json"
+logger = logging.getLogger(__name__)
+
+
+class ExecutionResult(list[dict]):
+    """Completed moves plus a safe, user-visible summary of what failed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures: list[dict] = []
+        self.state = "failed"
+        self.log_error: str | None = None
+        self.undo_available = False
+
+    @property
+    def moved(self) -> int:
+        return len(self)
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
+
+
+def _failure(name: str, reason: str) -> dict:
+    return {"file": name, "reason": reason}
+
+
+def _move_failure_reason(error: OSError) -> str:
+    if isinstance(error, PermissionError) or getattr(error, "winerror", None) in {5, 32, 33}:
+        return "file is locked or access was denied"
+    if isinstance(error, FileExistsError) or error.errno == errno.EEXIST:
+        return "destination already exists"
+    return "the file could not be moved safely"
+
+
+def _journal_write_failure(result: ExecutionResult, action: str, error: UndoLogError) -> None:
+    logger.exception("%s; no further files will be moved", action)
+    result.log_error = (
+        "The undo record could not be updated safely. "
+        "No further files will be moved; review History or Undo before trying again."
+    )
+    result.state = "partial" if result.moved else "failed"
 
 
 def execute_plan(
@@ -19,61 +65,123 @@ def execute_plan(
     dry_run: bool = True,
     source_root: str | None = None,
 ) -> List[dict]:
-    """Move files. Returns the list of moves actually made (empty on dry run)."""
-    done: List[dict] = []
+    """Move files through a durable per-run undo journal.
+
+    A validated intent record is written before the first move. Each move marks
+    itself started and completed in the journal before the next file begins. If
+    journal persistence fails, no additional destructive operation is attempted.
+    The returned list contains only files that were actually moved.
+    """
+    result = ExecutionResult()
+    selected = [
+        m
+        for m in moves
+        if m.selected
+    ]
     for m in moves:
+        if not m.selected:
+            src = Path(m.src)
+            category = "/".join(part for part in (m.folder, m.subfolder) if part)
+            print(f"  {src.name}  ->  kept in place (unselected: {category})")
+    if dry_run:
+        result.state = "success"
+        return result
+    if not selected:
+        result.state = "success"
+        return result
+
+    approved_source = Path(source_root) if source_root else None
+    journal_moves: list[dict] = []
+    move_plan: list[tuple[Move, Path, Path, dict]] = []
+    for m in selected:
         src, dest = Path(m.src), Path(m.dest)
         category = "/".join(part for part in (m.folder, m.subfolder) if part)
-        if not m.selected:
-            print(f"  {src.name}  ->  kept in place (unselected: {category})")
-            continue
         print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
-        if dry_run:
-            continue
         try:
-            validate_move_paths(
-                src,
-                dest,
-                Path(output_root),
-                Path(source_root) if source_root else None,
-            )
+            validate_move_paths(src, dest, Path(output_root), approved_source)
         except UnsafePathError as error:
-            print(f"    skipped: unsafe path ({error})")
+            logger.warning("Skipped unsafe move for %s: %s", src, error)
+            result.failures.append(_failure(src.name, "the path did not pass safety checks"))
             continue
         if not src.exists():
-            print(f"    skipped: source missing")
+            result.failures.append(_failure(src.name, "source file is missing"))
             continue
         if dest.exists():
-            print(f"    skipped: destination already exists")
+            result.failures.append(_failure(src.name, "destination already exists"))
             continue
-        try:
-            validate_move_paths(
-                src,
-                dest,
-                Path(output_root),
-                Path(source_root) if source_root else None,
-            )
-            move_file_no_overwrite(src, dest)
-            done.append({"src": str(src), "dest": str(dest)})
-        except OSError as e:
-            print(f"    FAILED: {e}")
-    if done:
-        _write_log(output_root, done)
-    return done
+        record = {"src": str(src), "dest": str(dest), "started": False, "completed": False}
+        journal_moves.append(record)
+        move_plan.append((m, src, dest, record))
 
+    if not move_plan:
+        result.state = "failed"
+        return result
 
-def _write_log(output_root: str, done: List[dict]) -> None:
-    log = Path(output_root) / UNDO_LOG
-    log.parent.mkdir(parents=True, exist_ok=True)
+    run_key = uuid4().hex
+    entry = {
+        "run_id": run_key,
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "state": "applying",
+        "moves": journal_moves,
+        "failures": list(result.failures),
+    }
     try:
-        history = json.loads(log.read_text(encoding="utf-8")) if log.exists() else []
-    except (OSError, ValueError):
-        history = []
-    history.append({"time": datetime.now().isoformat(timespec="seconds"), "moves": done})
-    temporary = log.with_name(log.name + ".tmp")
-    temporary.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    os.replace(temporary, log)
+        history_entries = load_history_for_update(output_root)
+        history_entries.append(entry)
+        write_history(output_root, history_entries)
+        result.undo_available = True
+    except UndoLogError as error:
+        _journal_write_failure(
+            result,
+            "Refused to move files because the initial undo record could not be saved",
+            error,
+        )
+        return result
 
+    for m, src, dest, record in move_plan:
+        record["started"] = True
+        try:
+            write_history(output_root, history_entries)
+        except UndoLogError as error:
+            _journal_write_failure(result, "Could not save move progress before moving a file", error)
+            break
+
+        try:
+            move_file_no_overwrite(src, dest)
+        except OSError as error:
+            logger.exception("Could not move %s to %s", src, dest)
+            record["started"] = False
+            result.failures.append(_failure(src.name, _move_failure_reason(error)))
+            entry["failures"] = list(result.failures)
+            try:
+                write_history(output_root, history_entries)
+            except UndoLogError as journal_error:
+                _journal_write_failure(result, "Could not save a failed move to the undo record", journal_error)
+                break
+            continue
+
+        record["started"] = False
+        record["completed"] = True
+        result.append({"src": str(src), "dest": str(dest)})
+        try:
+            write_history(output_root, history_entries)
+        except UndoLogError as error:
+            _journal_write_failure(result, "A file moved but its completed state could not be saved", error)
+            break
+
+    entry["state"] = "completed" if not result.failures and not result.log_error else (
+        "partial" if result.moved else "failed"
+    )
+    entry["failures"] = list(result.failures)
+    try:
+        write_history(output_root, history_entries)
+    except UndoLogError as error:
+        _journal_write_failure(result, "Could not finalize the undo record", error)
+
+    result.state = "success" if entry["state"] == "completed" and not result.log_error else (
+        "partial" if result.moved else "failed"
+    )
+    return result
 
 def undo_last(output_root: str) -> int:
     """Reverse the most recent run using the hardened history implementation."""
