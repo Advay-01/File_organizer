@@ -74,11 +74,13 @@ Build the optimized executable and NSIS installer:
 npm run desktop:build
 ```
 
-These commands use the project-local `.cargo` and `.rustup` directories, stage
-the PyInstaller sidecar under the required target-triple name, and keep Tauri's
-NSIS tools under `src-tauri/target`. Provider credentials are never bundled. For
-a packaged build, place `sortly.env` in the Tauri application configuration
-directory or set `SORTLY_ENV_FILE` to an external environment file before launch.
+These commands use the project-local `.cargo` and `.rustup` directories. The
+build first removes generated sidecar and binary-staging directories, rebuilds
+the sidecar from source with `.pyinstaller-venv`, stages a complete clean copy,
+then builds the Tauri frontend and installer. Tauri's NSIS tools remain under
+`src-tauri/target`. Provider credentials are never bundled. For a packaged
+build, place `sortly.env` in the Tauri application configuration directory or
+set `SORTLY_ENV_FILE` to an external environment file before launch.
 
 ### Provider Studio
 
@@ -130,7 +132,10 @@ installed.
 Desktop scans reject protected roots and detected project roots, skip `.git`,
 `node_modules`, reparse points/junctions, hidden or system files, partial-download
 names, files above the configured size, and files modified within the configured
-recent-file window. Archive listings are bounded; archives are never extracted.
+recent-file window. Hidden directories and Sortly's own undo log stay excluded.
+Set `ORGANIZER_INCLUDE_HIDDEN_FILES=1` only when hidden files such as `.env`
+need deliberate local review; detected credentials remain redacted and
+unselected by default. Archive listings are bounded; archives are never extracted.
 
 Likely Aadhaar, PAN, payment-card, API-key, private-key, and financial-document
 content is detected locally. Detection is heuristic and can produce false positives

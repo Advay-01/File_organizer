@@ -29,9 +29,15 @@ API_KEY_PATTERNS = (
 )
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?im)^(?P<prefix>[ \t]*(?:export[ \t]+)?"
-    r"[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*"
-    r"[ \t]*=[ \t]*)(?P<value>[^\r\n]*\S[^\r\n]*)$"
+    r"(?im)^(?P<prefix>[ \t]*(?:export[ \t]+)?)"
+    r"(?P<key>[A-Za-z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)"
+    r"[A-Za-z0-9_.-]*)[ \t]*(?P<separator>[=:])[ \t]*"
+    r"(?P<value>(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*\S))[ \t]*\r?$"
+)
+SENSITIVE_FILENAME = re.compile(
+    r"(?:^|[_.-])(?:credentials?|secrets?|passwords?|private[_-]?key|"
+    r"api[_-]?key|access[_-]?token)(?:[_.-]|$)|(?:^|\.)env$",
+    re.I,
 )
 FINANCIAL_TERMS = (
     "invoice", "receipt", "amount due", "tax invoice", "bank account",
@@ -54,9 +60,46 @@ def luhn_valid(value: str) -> bool:
     return total % 10 == 0
 
 
+def _credential_value_is_meaningful(match: re.Match) -> bool:
+    value = match.group("value").strip()
+    quoted = (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in {'"', "'"}
+    )
+    if quoted:
+        value = value[1:-1].strip()
+    if not 4 <= len(value) <= 256:
+        return False
+    if re.fullmatch(
+        r"(?i)(?:none|null|n/a|not set|redacted|placeholder|change[ _-]?me|"
+        r"<[^>]+>|x{4,}|\.{3,})",
+        value,
+    ):
+        return False
+    if re.match(
+        r"(?i)^(?:reset|required|change|enter|use|your|the|must|should)\b",
+        value,
+    ) and re.search(r"\s", value):
+        return False
+    if not quoted and re.search(r"\s", value):
+        # Unquoted prose is ambiguous; quoted values may contain spaces.
+        return False
+    return bool(re.search(r"[A-Za-z0-9]", value))
+
+
+def _credential_assignments(text: str):
+    return (
+        match
+        for match in CREDENTIAL_ASSIGNMENT.finditer(text or "")
+        if _credential_value_is_meaningful(match)
+    )
+
+
 def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveFinding]:
     """Return likely-sensitive categories without retaining matched values."""
-    haystack = " ".join([text or "", *map(str, metadata)])
+    metadata_values = [str(value) for value in metadata]
+    haystack = " ".join([text or "", *metadata_values])
     findings: List[SensitiveFinding] = []
     lowered = haystack.lower()
     for match in AADHAAR_PATTERN.finditer(haystack):
@@ -93,9 +136,13 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
         findings.append(SensitiveFinding("likely_api_key", ("provider key pattern",)))
     if PRIVATE_KEY_PATTERN.search(text or ""):
         findings.append(SensitiveFinding("private_key", ("PEM private-key header",)))
-    if CREDENTIAL_ASSIGNMENT.search(text or ""):
+    if next(_credential_assignments(text or ""), None) is not None:
         findings.append(
             SensitiveFinding("likely_credential_assignment", ("secret-like environment assignment",))
+        )
+    if any(SENSITIVE_FILENAME.search(value) for value in metadata_values):
+        findings.append(
+            SensitiveFinding("likely_credential_file", ("credential-like filename or context",))
         )
 
     matches = sum(1 for term in FINANCIAL_TERMS if term in lowered)
@@ -112,10 +159,15 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
 def redact_sensitive(text: str) -> str:
     """Mask likely identifiers and credentials; exact matches never enter diagnostics."""
     result = text or ""
-    result = CREDENTIAL_ASSIGNMENT.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED SECRET]",
-        result,
-    )
+    def redact_assignment(match: re.Match) -> str:
+        if not _credential_value_is_meaningful(match):
+            return match.group(0)
+        return (
+            f"{match.group('prefix')}{match.group('key')}"
+            f"{match.group('separator')} [REDACTED SECRET]"
+        )
+
+    result = CREDENTIAL_ASSIGNMENT.sub(redact_assignment, result)
     result = PRIVATE_KEY_PATTERN.sub("[REDACTED PRIVATE KEY HEADER]", result)
     for pattern in API_KEY_PATTERNS:
         result = pattern.sub("[REDACTED API KEY]", result)

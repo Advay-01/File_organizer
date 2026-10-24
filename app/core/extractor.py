@@ -28,6 +28,7 @@ SNIFF_BYTES = 1024
 
 TEXT_EXTS = {
     ".txt", ".md", ".rst", ".csv", ".json", ".yaml", ".yml", ".toml", ".ini", ".log",
+    ".env", ".tf", ".hcl",
     ".py", ".java", ".c", ".cpp", ".h", ".js", ".ts", ".go", ".rs", ".html", ".css",
     ".sql", ".ipynb", ".tex", ".srt", ".vtt", ".svg", ".xml", ".sh", ".ps1",
 }
@@ -36,7 +37,20 @@ HTML_MARKER = re.compile(r"(?is)<!doctype\s+html\b|<html(?:\s|>)|<script(?:\s|>)
 SHEBANG_MARKER = re.compile(r"^#![^\r\n]*(?:bash|zsh|/sh)\b", re.I)
 PRIVATE_KEY_MARKER = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 ENV_ASSIGNMENT = re.compile(
-    r"(?m)^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*[^\s#]+"
+    r"(?m)^[ \t]*(?P<export>export[ \t]+)?"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(?:[^\s#]+|[^\r\n]+)"
+)
+INI_SECTION = re.compile(r"(?m)^[ \t]*\[[^\]\r\n]+\][ \t]*\r?$")
+TOML_TABLE = re.compile(r"(?m)^[ \t]*\[\[?[A-Za-z0-9_.\"-]+\]?\][ \t]*\r?$")
+TOML_TYPED_VALUE = re.compile(
+    r"(?m)^[ \t]*[A-Za-z0-9_.\"-]+[ \t]*=[ \t]*"
+    r"(?:true|false|[-+]?\d+(?:\.\d+)?|\[[^\r\n]*\]|\{[^\r\n]*\})"
+    r"[ \t]*(?:#.*)?\r?$"
+)
+TERRAFORM_BLOCK = re.compile(
+    r"(?im)^[ \t]*(?:terraform[ \t]*\{|"
+    r"(?:provider|resource|variable|module|output|data)[ \t]+(?:\"[^\"\r\n]+\"|"
+    r"[A-Za-z_][A-Za-z0-9_-]*)[ \t]*\{)"
 )
 SQL_MARKERS = (
     re.compile(r"(?is)\bselect\b.{0,500}\bfrom\b"),
@@ -158,8 +172,6 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
         return FormatDetection(".sh", "high", ("shell shebang",))
     if PRIVATE_KEY_MARKER.search(value):
         return FormatDetection(".pem", "high", ("PEM private-key header",))
-    if len(ENV_ASSIGNMENT.findall(value)) >= 2:
-        return FormatDetection(".env", "high", ("environment-variable assignments",))
     if HTML_MARKER.search(value):
         return FormatDetection(".html", "high", ("HTML document markup",))
     if re.match(r"(?is)^<svg(?:\s|>)", value):
@@ -180,6 +192,39 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
             return FormatDetection(".xml", "high", ("valid XML document",))
         except (ElementTree.ParseError, RecursionError, LookupError, ValueError):
             pass
+
+    if TERRAFORM_BLOCK.search(value):
+        return FormatDetection(".tf", "high", ("Terraform/HCL block syntax",))
+
+    env_assignments = list(ENV_ASSIGNMENT.finditer(value))
+    has_ini_section = bool(INI_SECTION.search(value))
+    has_toml_table = bool(TOML_TABLE.search(value))
+    has_typed_toml = bool(TOML_TYPED_VALUE.search(value))
+    env_keys = [match.group("key") for match in env_assignments]
+    env_key_style = bool(env_keys) and all(
+        re.fullmatch(
+            r"(?:[A-Z][A-Z0-9_]*|"
+            r"[A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|URL|HOST|PORT|"
+            r"ENV|MODE|DEBUG|ROOT|PATH|USER|NAME|ID))",
+            key,
+        )
+        for key in env_keys
+    )
+    if has_toml_table and (
+        "[[" in value
+        or re.search(r"(?m)^[ \t]*\[[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+\]", value)
+    ):
+        return FormatDetection(".toml", "high", ("TOML table and typed values",))
+    if has_ini_section and env_assignments:
+        return FormatDetection(".ini", "high", ("INI section and key assignments",))
+    if len(env_assignments) >= 2 and (
+        any(match.group("export") for match in env_assignments) or env_key_style
+    ):
+        return FormatDetection(".env", "high", ("environment-variable assignments",))
+    if has_toml_table and not env_assignments:
+        return FormatDetection(".toml", "medium", ("TOML-style table header",))
+    if has_typed_toml and len(env_assignments) >= 2:
+        return FormatDetection(".toml", "medium", ("typed key/value configuration",))
 
     sql_signals = sum(bool(pattern.search(value)) for pattern in SQL_MARKERS)
     if sql_signals:

@@ -31,9 +31,9 @@ GENERIC_NAME = re.compile(
 )
 EXTENSION_OVERRIDES = {
     ".bmp", ".c", ".cpp", ".csv", ".docx", ".env", ".epub", ".gif", ".gz", ".html",
-    ".ipynb", ".jpg", ".js", ".json", ".md", ".pdf", ".pem", ".png", ".pptx",
-    ".py", ".rar", ".sh", ".sql", ".svg", ".tar", ".tiff", ".txt", ".webp",
-    ".xlsx", ".xml", ".zip",
+    ".ini", ".ipynb", ".jpg", ".js", ".json", ".md", ".pdf", ".pem", ".png",
+    ".pptx", ".py", ".rar", ".sh", ".sql", ".svg", ".tar", ".tf", ".tiff", ".toml",
+    ".txt", ".webp", ".xlsx", ".xml", ".zip",
 }
 
 SYSTEM_PROMPT = """You analyze files for a Windows file organizer.
@@ -185,6 +185,7 @@ def _fallback_suggestion(file: FileInfo, evidence: EvidenceBundle) -> dict:
         "filename_conflict": "extension_mismatch" if evidence.extension_mismatch else "none",
         "suggested_name": "",
         "name_evidence": "",
+        "selected": False,
     }
 
 
@@ -337,6 +338,11 @@ def _build_suggestion(
         and confidence in {"high", "medium"}
         and (grounded or bool(evidence.content.strip()))
     )
+    selected = (
+        selected_by_default
+        and not evidence.sensitive
+        and evidence.extraction_status != "unavailable"
+    )
     return ContentSuggestion(
         id=item_id,
         path=file.path,
@@ -357,7 +363,7 @@ def _build_suggestion(
         detected_type=evidence.detected_type,
         extraction_status=evidence.extraction_status,
         sensitive=evidence.sensitive,
-        selected=selected_by_default,
+        selected=selected,
     )
 
 
@@ -390,7 +396,11 @@ def _stored_suggestion(
         detected_type=str(stored.get("detected_type", evidence.detected_type)),
         extraction_status=str(stored.get("extraction_status", evidence.extraction_status)),
         sensitive=bool(stored.get("sensitive", evidence.sensitive)),
-        selected=bool(stored.get("selected", True)),
+        selected=(
+            bool(stored.get("selected", True))
+            and not evidence.sensitive
+            and evidence.extraction_status != "unavailable"
+        ),
     )
 
 

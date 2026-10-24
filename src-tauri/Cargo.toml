@@ -1,6 +1,6 @@
 [package]
 name = "sortly"
-version = "0.1.0"
+version = "0.1.1"
 description = "Sortly AI File Organizer desktop application"
 authors = ["Sortly"]
 edition = "2021"

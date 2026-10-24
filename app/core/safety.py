@@ -31,6 +31,7 @@ class ScanPolicy:
     recent_seconds: int = 5
     skip_partial: bool = True
     skip_hidden_system: bool = True
+    include_hidden_files: bool = False
 
     @classmethod
     def from_env(cls, recent_default: int = 5) -> "ScanPolicy":
@@ -41,6 +42,7 @@ class ScanPolicy:
             recent_seconds=int(os.getenv("ORGANIZER_RECENT_SECONDS", str(recent_default))),
             skip_partial=os.getenv("ORGANIZER_SKIP_PARTIAL", "1").lower() not in {"0", "false", "no"},
             skip_hidden_system=os.getenv("ORGANIZER_SKIP_HIDDEN_SYSTEM", "1").lower() not in {"0", "false", "no"},
+            include_hidden_files=os.getenv("ORGANIZER_INCLUDE_HIDDEN_FILES", "0").lower() in {"1", "true", "yes"},
         )
 
 
@@ -60,6 +62,14 @@ def is_hidden_or_system(path: Path) -> bool:
         hidden = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0x2)
         system = getattr(stat, "FILE_ATTRIBUTE_SYSTEM", 0x4)
         return bool(attributes & (hidden | system))
+    except OSError:
+        return True
+
+
+def is_system_path(path: Path) -> bool:
+    try:
+        attributes = getattr(path.stat(), "st_file_attributes", 0)
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_SYSTEM", 0x4))
     except OSError:
         return True
 

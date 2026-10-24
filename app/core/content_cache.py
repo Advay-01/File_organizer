@@ -10,9 +10,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from app.core.evidence import EvidenceBundle
+from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 DEFAULT_DB = Path(os.environ.get("ORGANIZER_CACHE_DB", Path.home() / ".file_organizer" / "cache.db"))
 
 
@@ -103,6 +104,7 @@ def analysis_cache_key(
             "detected_type_confidence": evidence.detected_type_confidence,
             "parser_status": evidence.parser_status,
             "filename": evidence.filename.lower(),
+            "parent_directory": evidence.parent_directory.lower(),
             "models": models,
             "known_folders": sorted(folder.lower() for folder in known_folders),
             "allow_rename": allow_rename,
@@ -120,10 +122,38 @@ def analysis_cache_key(
 def refresh_evidence_identity(evidence: EvidenceBundle, file: FileInfo) -> EvidenceBundle:
     """Reuse content-derived evidence without retaining another file's identity."""
     path = Path(file.path)
+    findings = detect_sensitive(
+        evidence.content,
+        [
+            *[
+                str(value)
+                for value in evidence.metadata.values()
+                if value not in (None, "")
+            ],
+            path.name,
+            path.parent.name,
+        ],
+    )
+    warnings = [
+        warning
+        for warning in evidence.warnings
+        if not warning.startswith("Potential sensitive content detected (")
+    ]
+    if findings:
+        kinds = ", ".join(
+            sorted({finding.kind.replace("_", " ") for finding in findings})
+        )
+        warnings.append(
+            f"Potential sensitive content detected ({kinds}). "
+            "Cloud processing is disabled by default."
+        )
     return replace(
         evidence,
         path=str(path),
         filename=path.name,
         extension=path.suffix.lower(),
         parent_directory=path.parent.name,
+        warnings=warnings,
+        sensitive_findings=[finding.to_dict() for finding in findings],
+        redacted_content=redact_sensitive(evidence.content),
     )

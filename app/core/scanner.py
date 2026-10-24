@@ -17,11 +17,13 @@ from app.core.safety import (
     is_hidden_or_system,
     is_partial_download,
     is_reparse_point,
+    is_system_path,
     resolved_inside,
     should_skip_directory,
 )
 
 SKIP_DIRS = {".git", ".idea", ".venv", "venv", "__pycache__", "node_modules"}
+SKIP_FILES = {".organizer_undo.json", ".organizer_undo.json.tmp"}
 
 
 @dataclass
@@ -60,9 +62,17 @@ def scan_directory_with_report(
             summary.files_seen += 1
             p = current / name
             skip_reason = None
-            if name.startswith("."):
+            if name.casefold() in SKIP_FILES:
+                skip_reason = "organizer_metadata"
+            elif policy.skip_hidden_system and is_system_path(p):
+                skip_reason = "system_file"
+            elif name.startswith(".") and not policy.include_hidden_files:
                 skip_reason = "hidden"
-            elif policy.skip_hidden_system and is_hidden_or_system(p):
+            elif (
+                policy.skip_hidden_system
+                and not policy.include_hidden_files
+                and is_hidden_or_system(p)
+            ):
                 skip_reason = "hidden_or_system_attribute"
             elif policy.skip_partial and is_partial_download(p):
                 skip_reason = "partial_download"

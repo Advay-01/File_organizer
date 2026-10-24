@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List
 
-from app.core.extractor import extract_content, extract_snippet
+from app.core.extractor import _read_text, extract_content, extract_snippet
 from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
@@ -293,8 +293,9 @@ def extract_evidence(
     )
     if status == "unavailable":
         warnings.append("No reliable content or metadata could be extracted.")
+    sensitivity_text = _read_text(path, max_chars) or content
     findings = detect_sensitive(
-        content,
+        sensitivity_text,
         [
             *[str(value) for value in metadata.values() if value not in (None, "")],
             path.name,
@@ -328,5 +329,5 @@ def extract_evidence(
         extraction_status=status,
         ocr_used=ocr_used,
         sensitive_findings=[finding.to_dict() for finding in findings],
-        redacted_content=redact_sensitive(content),
+        redacted_content=redact_sensitive(sensitivity_text),
     )
