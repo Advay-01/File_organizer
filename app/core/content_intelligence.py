@@ -49,6 +49,11 @@ Return ONLY JSON:
 "name_evidence":"exact phrase from evidence supporting the name, or empty"}]}
 Rules:
 - category must be a broad subject; subcategory should be reusable and concise.
+- reuse a folder from existing_folders (written Category/Subcategory, or one name) whenever it
+  fits; never invent a near-duplicate of an existing name (for example Technology when Software
+  already exists, or Sales Data next to Revenue Reports).
+- never put "/" or "\\" inside a category or subcategory; each is a single folder name.
+- files with identical content must receive the same category and subcategory.
 - high confidence requires substantial extracted content and a verified quote.
 - use insufficient and Misc/General when evidence is unreadable or too weak.
 - suggest a filename only when evidence clearly identifies the document.
@@ -141,6 +146,66 @@ def _confidence(model_value: str, evidence: EvidenceBundle, grounded: bool) -> s
     if requested == "high" and not grounded:
         return "medium"
     return requested
+
+
+def _folder_part(value) -> str:
+    """One folder level: a slash inside it (for example "C/C++") must not add a level."""
+    return re.sub(r"[\\/]+", " ", str(value or "")).strip()
+
+
+def _remember_folder(folders: set, stored: dict) -> None:
+    category = _folder_part(stored.get("category", ""))
+    subcategory = _folder_part(stored.get("subcategory", ""))
+    if category and category.casefold() != "misc":
+        folders.add("/".join(part for part in (category, subcategory) if part))
+
+
+_FOLDER_CONFIDENCE = {"insufficient": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def _harmonize_duplicate_folders(
+    files: List[FileInfo],
+    evidence_by_path: dict,
+    analysis_by_path: dict,
+    known_folders: List[str],
+) -> None:
+    """Choose one safe, best-supported folder for identical file content."""
+    known = {_folder_part(folder).casefold() for folder in known_folders}
+    groups: dict[str, list[tuple[int, str, dict]]] = {}
+    for order, file in enumerate(files):
+        evidence = evidence_by_path[file.path]
+        stored = analysis_by_path[file.path]
+        if (
+            evidence.fingerprint
+            and not evidence.sensitive
+            and evidence.extraction_status != "unavailable"
+        ):
+            groups.setdefault(evidence.fingerprint, []).append(
+                (order, file.path, stored)
+            )
+
+    for entries in groups.values():
+        if len(entries) < 2:
+            continue
+
+        def score(entry: tuple[int, str, dict]):
+            order, _path, stored = entry
+            category = _folder_part(stored.get("category", "Misc")) or "Misc"
+            subcategory = _folder_part(stored.get("subcategory", "General")) or "General"
+            target = f"{category}/{subcategory}".casefold()
+            return (
+                category.casefold() != "misc",
+                target in known or category.casefold() in known,
+                _FOLDER_CONFIDENCE.get(str(stored.get("confidence", "")), 0),
+                -order,
+            )
+
+        _order, _path, winner = max(entries, key=score)
+        category = _folder_part(winner.get("category", "Misc")) or "Misc"
+        subcategory = _folder_part(winner.get("subcategory", "General")) or "General"
+        for _entry_order, _entry_path, stored in entries:
+            stored["category"] = category
+            stored["subcategory"] = subcategory
 
 
 def _generic_filename(name: str) -> bool:
@@ -270,7 +335,8 @@ def _build_suggestion(
     selected_by_default: bool = True,
 ) -> ContentSuggestion:
     category, subcategory = sanitize_target_path(
-        f"{result.get('category', 'Misc')}/{result.get('subcategory', 'General')}"
+        f"{_folder_part(result.get('category', 'Misc')) or 'Misc'}/"
+        f"{_folder_part(result.get('subcategory', 'General')) or 'General'}"
     )
     quote = str(result.get("evidence_quote", "") or "")
     grounded = _quote_is_grounded(quote, evidence)
@@ -430,6 +496,7 @@ def plan_content_intelligence(
     known_folders = sorted(set(known_folders or []))
     evidence_by_path = {}
     analysis_by_path = {}
+    analysis_keys_by_path = {}
     cache_hits = 0
     todo = []
     cloud_model_selected = any(
@@ -453,6 +520,7 @@ def plan_content_intelligence(
                 known_folders,
                 allow_rename=allow_rename,
             )
+            analysis_keys_by_path[file.path] = key
             if evidence.sensitive and cloud_model_selected and not allow_sensitive_cloud:
                 analysis_by_path[file.path] = _sensitive_fallback(evidence)
                 continue
@@ -463,12 +531,18 @@ def plan_content_intelligence(
             elif evidence.extraction_status == "unavailable":
                 fallback = _fallback_suggestion(file, evidence)
                 analysis_by_path[file.path] = fallback
-                cache.put_analysis(key, fallback)
+                if use_cache:
+                    cache.put_analysis(key, fallback)
             else:
                 todo.append((file, evidence, key))
         if progress:
             progress("reading files", len(files), len(files))
         extraction_seconds = round(time.perf_counter() - extraction_started, 3)
+
+        # Folders chosen earlier in this run (or restored from cache) guide later batches.
+        seen_folders: set = set()
+        for stored_analysis in analysis_by_path.values():
+            _remember_folder(seen_folders, stored_analysis)
 
         for start in range(0, len(todo), max(1, batch_size)):
             batch = todo[start : start + max(1, batch_size)]
@@ -481,15 +555,18 @@ def plan_content_intelligence(
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {"existing_folders": known_folders, "files": prompt_items},
+                        {
+                            "existing_folders": sorted(set(known_folders) | seen_folders),
+                            "files": prompt_items,
+                        },
                         ensure_ascii=False,
                     ),
                 },
             ]
             raw = completion_fn(messages) if completion_fn else _model_call(models, messages)
             parsed = _parse_response(raw, {index for index in range(len(batch))})
-            for index, (file, evidence, key) in enumerate(batch):
-                result = parsed.get(index) or _fallback_suggestion(file, evidence)
+            for index, (file, evidence, _key) in enumerate(batch):
+                result = dict(parsed.get(index) or _fallback_suggestion(file, evidence))
                 suggestion = _build_suggestion(
                     index,
                     file,
@@ -500,10 +577,24 @@ def plan_content_intelligence(
                 )
                 stored = suggestion.to_dict()
                 analysis_by_path[file.path] = stored
-                if use_cache and evidence.fingerprint and not evidence.sensitive:
-                    cache.put_analysis(key, stored)
+                _remember_folder(seen_folders, stored)
             if progress:
                 progress("analyzing content", min(start + len(batch), len(todo)), len(todo))
+
+        _harmonize_duplicate_folders(
+            files,
+            evidence_by_path,
+            analysis_by_path,
+            known_folders,
+        )
+        if use_cache:
+            for file in files:
+                evidence = evidence_by_path[file.path]
+                if evidence.fingerprint and not evidence.sensitive:
+                    cache.put_analysis(
+                        analysis_keys_by_path[file.path],
+                        analysis_by_path[file.path],
+                    )
 
         suggestions = []
         for item_id, file in enumerate(files):

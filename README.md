@@ -111,9 +111,12 @@ The React desktop workflow uses a content-first preview:
 2. Common file signatures are compared with extensions.
 3. The active Provider Studio configuration classifies bounded batches and proposes
    grounded filenames.
-4. Code verifies every evidence phrase against extracted content/metadata and caps
+4. Later batches are shown folders selected earlier in the run. Files with identical
+   non-sensitive content converge on one supported folder, while each file keeps its
+   own filename, extension, and sensitivity result.
+5. Code verifies every evidence phrase against extracted content/metadata and caps
    confidence when evidence is weak.
-5. Each file can be accepted, rejected, re-categorized, or renamed independently
+6. Each file can be accepted, rejected, re-categorized, or renamed independently
    before one confirmed move/rename operation.
 
 Evidence extraction and analysis results are cached separately. Extraction is keyed
@@ -145,6 +148,13 @@ model request. Their raw evidence is not persisted in the content cache.
 
 Unusual plans with excessive folders, concentrated destinations, or excessive
 `Misc` assignments display warnings and require an additional confirmation.
+
+Files left untouched by scanning are reported with plain-language notice text rather
+than an error, including why they were not analyzed. Local heuristics also flag bounded
+command patterns such as downloaded-and-executed scripts, encoded commands, destructive
+root-folder commands, and reverse-shell indicators. Detection only inspects text:
+Sortly never executes inspected file contents. These checks are heuristic and can
+produce false positives or false negatives.
 
 ## Recognized file types
 The organizer scans all normal files. It can give the model content or metadata from:

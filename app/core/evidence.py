@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List
 
 from app.core.extractor import _read_text, extract_content, extract_snippet
-from app.core.privacy import detect_sensitive, redact_sensitive
+from app.core.privacy import detect_sensitive, detect_suspicious_commands, redact_sensitive
 from app.models.schemas import FileInfo
 
 EVIDENCE_VERSION = 4
@@ -36,6 +36,7 @@ class EvidenceBundle:
     ocr_used: bool = False
     sensitive_findings: List[dict] = field(default_factory=list)
     redacted_content: str = ""
+    suspicious_commands: List[str] = field(default_factory=list)
 
     def evidence_text(self) -> str:
         metadata_text = " ".join(
@@ -308,6 +309,13 @@ def extract_evidence(
             f"Potential sensitive content detected ({kinds}). Cloud processing is disabled by default."
         )
 
+    suspicious = detect_suspicious_commands(sensitivity_text)
+    if suspicious:
+        warnings.append(
+            f"Security: this file {'; '.join(suspicious)}. Sortly only moves files and never runs "
+            "them, but review it before you run it yourself."
+        )
+
     return EvidenceBundle(
         path=str(path),
         fingerprint=fingerprint,
@@ -330,4 +338,5 @@ def extract_evidence(
         ocr_used=ocr_used,
         sensitive_findings=[finding.to_dict() for finding in findings],
         redacted_content=redact_sensitive(sensitivity_text),
+        suspicious_commands=suspicious,
     )

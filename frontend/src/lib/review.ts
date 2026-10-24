@@ -32,8 +32,42 @@ export type ReviewStats = {
   security: number;
 };
 
+export type ScanSummary = {
+  skipped: number;
+  reasons: Record<string, number>;
+  truncated: boolean;
+};
+
 const SECURITY_WARNING = /\b(?:sensitive|credential|private key|unsafe|malicious|security|injection)\b/i;
 const DIAGNOSTIC_WARNING = /\b(?:parser|extension|metadata|extraction|grounded|evidence phrase)\b/i;
+const SKIP_REASON_LABELS: Record<string, string> = {
+  hidden: "hidden files (names starting with a dot, such as .env)",
+  hidden_or_system_attribute: "hidden or system files",
+  system_file: "system files",
+  organizer_metadata: "Sortly metadata files",
+  partial_download: "unfinished downloads",
+  not_regular_file_or_reparse_point: "shortcuts or special files",
+  outside_approved_root: "files outside the chosen folder",
+  file_size_limit: "files over the size limit",
+  recently_modified: "files changed a moment ago",
+  locked_or_unreadable: "files that could not be opened",
+  file_count_limit: "files beyond the file-count limit",
+  protected_or_special_directory: "protected folders",
+};
+
+export function skipReasonLabel(reason: string): string {
+  return SKIP_REASON_LABELS[reason] ?? reason.replace(/_/g, " ");
+}
+
+export function describeSkips(summary: ScanSummary): string {
+  const parts = Object.entries(summary.reasons ?? {})
+    .filter(([reason, count]) => count > 0 && reason !== "protected_or_special_directory")
+    .map(([reason, count]) => `${count} ${skipReasonLabel(reason)}`);
+  const noun = summary.skipped === 1 ? "file was" : "files were";
+  const detail = parts.length > 0 ? ` (${parts.join("; ")})` : "";
+  const limit = summary.truncated ? " The file-count limit was reached." : "";
+  return `${summary.skipped} ${noun} left untouched and not analyzed${detail}.${limit}`;
+}
 
 function currentEdit(file: ReviewFile, edit?: ReviewEdit): ReviewEdit {
   return edit ?? {
