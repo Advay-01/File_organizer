@@ -179,18 +179,45 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _resolve_plan_source(raw_path: str, root: Path) -> Path:
+    """Resolve a stored source path against the selected root exactly once."""
+    resolved_root = root.expanduser().resolve(strict=False)
+    raw = Path(raw_path).expanduser()
+    if raw.is_absolute():
+        candidate = raw
+        root_parts = tuple(part.casefold() for part in resolved_root.parts)
+        candidate_parts = tuple(part.casefold() for part in candidate.parts)
+        duplicated_prefix = (
+            len(candidate_parts) > len(root_parts)
+            and candidate_parts[: len(root_parts)] == root_parts
+            and candidate_parts[len(root_parts)] == resolved_root.name.casefold()
+        )
+        if duplicated_prefix:
+            candidate = resolved_root.joinpath(*candidate.parts[len(root_parts) + 1 :])
+    else:
+        parts = raw.parts
+        if parts and parts[0].casefold() == resolved_root.name.casefold():
+            candidate = resolved_root.joinpath(*parts[1:])
+        else:
+            candidate = resolved_root / raw
+    return candidate.resolve(strict=False)
+
+
 def _validate_for_apply(plan: StoredPlan) -> None:
     for move in plan.moves:
         if not move.selected:
             continue
         source = Path(move.src)
         destination = Path(move.dest)
+        if not source.is_file():
+            raise HTTPException(
+                409,
+                f"Preview is stale because this source file is missing: {source.name}",
+            )
         try:
             validate_move_paths(source, destination, plan.source)
         except UnsafePathError as error:
             raise HTTPException(400, f"Unsafe file operation: {error}") from error
-        if not source.is_file():
-            raise HTTPException(409, f"Preview is stale because this file changed or disappeared: {source.name}")
 
 
 def _hierarchy(root: Path, moves: List[dict]) -> dict:
@@ -240,7 +267,7 @@ def _content_moves(
         destination = _unique_destination(destination_folder / suggestion.suggested_name, taken)
         moves.append(
             Move(
-                suggestion.path,
+                str(_resolve_plan_source(suggestion.path, source)),
                 str(destination),
                 suggestion.category,
                 suggestion.reasoning,
@@ -286,6 +313,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
         )
         category, subcategory = sanitize_target_path(target_path)
         planned_extension = Path(original.dest).suffix
+        source = _resolve_plan_source(original.src, plan.source)
         destination_name = sanitize_windows_filename(
             edit.destination_name or Path(original.src).name,
             Path(original.src).name,
@@ -297,7 +325,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
         )
         moves.append(
             Move(
-                original.src,
+                str(source),
                 str(destination),
                 category,
                 original.reason,
@@ -469,6 +497,8 @@ def apply(request: ApplyRequest) -> dict:
         raise HTTPException(409, "Review and acknowledge the unusual plan warnings before organizing.")
 
     plan.moves = _apply_user_edits(plan, request)
+    for move in plan.moves:
+        move.src = str(_resolve_plan_source(move.src, plan.source))
 
     _validate_for_apply(plan)
     done = execute_plan(
