@@ -45,6 +45,88 @@ FINANCIAL_TERMS = (
 )
 
 
+_SHELL = r"(?:sudo\s+)?(?:ba|z|da|k)?sh\b"
+_DOWNLOAD_AND_RUN = re.compile(
+    rf"\b(?:curl|wget)\b[^\r\n|;&]*\|\s*{_SHELL}",
+    re.I,
+)
+_DOWNLOAD_TO_FILE = re.compile(
+    rf"\b(?:curl|wget)\b[^\r\n;&|]*(?:\s-o\s+|\s--output(?:-document)?\s+)"
+    r"(?P<file>[^\s;&|'\"]+)[^\r\n;&|]*(?:&&|;)[^\r\n]*"
+    rf"(?:\b(?:ba|z|da|k)?sh\s+(?P=file)\b|"
+    rf"\bchmod\s+\+x\s+(?P=file)\b|"
+    rf"(?:&&|;)\s*(?:\./)?(?P=file)\b)",
+    re.I,
+)
+_DOWNLOAD_AND_RUN_POWERSHELL = re.compile(
+    r"\b(?:iwr|irm|invoke-webrequest|invoke-restmethod)\b[^\r\n|]*"
+    r"\|\s*(?:iex|invoke-expression)\b"
+    r"|\b(?:iex|invoke-expression)\b[^\r\n]*"
+    r"\b(?:downloadstring|iwr|irm|invoke-webrequest|invoke-restmethod)\b",
+    re.I,
+)
+_ENCODED_POWERSHELL = re.compile(
+    r"\bpowershell(?:\.exe)?\b[^\r\n]*(?<!\w)"
+    r"-(?:e|ec|enc|encodedcommand)\b\s*:?\s*['\"]?[A-Za-z0-9+/=]{20,}",
+    re.I,
+)
+_BASE64_TO_SHELL = re.compile(
+    rf"\bbase64\s+(?:-d|--decode)\b[^\r\n|]*\|\s*{_SHELL}",
+    re.I,
+)
+_BASE64_TO_POWERSHELL = re.compile(
+    r"\b(?:iex|invoke-expression)\b[^\r\n]*"
+    r"(?:frombase64string|convert\.frombase64string)"
+    r"|(?:frombase64string|convert\.frombase64string)[^\r\n]*"
+    r"\|\s*(?:iex|invoke-expression)\b",
+    re.I,
+)
+_DESTRUCTIVE_UNIX_ROOT = re.compile(
+    r"(?im)(?:^|[;&|]\s*|\bsudo\s+)\brm\s+"
+    r"(?=[^\r\n;&|]*-[a-z]*r)(?=[^\r\n;&|]*-[a-z]*f)"
+    r"[^\r\n;&|]*?(?:--no-preserve-root\s+)?"
+    r"['\"]?(?:/|~|\$HOME|\$\{HOME\})['\"]?"
+    r"(?:\*(?![\w./-])|\s*(?:;|&&|\|\||$))",
+)
+_DESTRUCTIVE_WINDOWS_ROOT = re.compile(
+    r"(?im)\b(?:remove-item|ri|del|erase|rmdir|rd)\b"
+    r"(?=[^\r\n;&|]*(?:-recurse\b|/s\b))"
+    r"(?=[^\r\n;&|]*(?:-force\b|/q\b))"
+    r"[^\r\n;&|]*?['\"]?"
+    r"(?:[a-z]:[\\/]?|\$env:(?:systemdrive|userprofile)[\\/]?)"
+    r"['\"]?(?:\s*(?:;|&&|\|\||$)|\s*\*)",
+    re.I,
+)
+_REVERSE_SHELL = re.compile(
+    rf"\b(?:ba|z|da|k)?sh\s+-i\b[^\r\n]*(?:/dev/tcp/|>&\s*\d)"
+    r"|\b(?:nc|ncat|netcat)\b[^\r\n]*(?:\s-e\s+(?:/bin/)?(?:ba|z|da|k)?sh\b"
+    r"|\s--exec\s+(?:/bin/)?(?:ba|z|da|k)?sh\b)"
+    r"|\bsocat\b[^\r\n]*(?:tcp|exec:)[^\r\n]*(?:exec:)?(?:/bin/)?(?:ba|z|da|k)?sh\b",
+    re.I,
+)
+SUSPICIOUS_COMMANDS = (
+    ("downloads and runs remote code", _DOWNLOAD_AND_RUN),
+    ("downloads and runs remote code", _DOWNLOAD_TO_FILE),
+    ("downloads and runs remote code", _DOWNLOAD_AND_RUN_POWERSHELL),
+    ("runs an encoded PowerShell command", _ENCODED_POWERSHELL),
+    ("decodes hidden text and runs it", _BASE64_TO_SHELL),
+    ("decodes hidden text and runs it", _BASE64_TO_POWERSHELL),
+    ("deletes a whole system or home folder", _DESTRUCTIVE_UNIX_ROOT),
+    ("deletes a whole system or home folder", _DESTRUCTIVE_WINDOWS_ROOT),
+    ("opens a reverse shell", _REVERSE_SHELL),
+)
+
+
+def detect_suspicious_commands(text: str) -> List[str]:
+    """Describe risky command patterns in plain words. Detection only: nothing is run or isolated."""
+    value = text or ""
+    found: List[str] = []
+    for description, pattern in SUSPICIOUS_COMMANDS:
+        if description not in found and pattern.search(value):
+            found.append(description)
+    return found
+
+
 def luhn_valid(value: str) -> bool:
     digits = [int(character) for character in value if character.isdigit()]
     if not 13 <= len(digits) <= 19 or len(set(digits)) == 1:

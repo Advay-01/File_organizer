@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  describeSkips,
   filterReviewGroups,
   getFileReviewStatus,
   getInitialGroupLimit,
   getReviewBatchMode,
   shouldExpandGroupsInitially,
   shouldShowReviewTools,
+  skipReasonLabel,
   summarizeFileWarning,
   summarizeGroup,
   summarizeReview,
@@ -116,4 +118,32 @@ test("group summaries and large initial rendering stay bounded", () => {
   assert.deepEqual(summary, { attention: 0, security: 0 });
   assert.equal(shouldExpandGroupsInitially(items.length), false);
   assert.equal(getInitialGroupLimit(items.length), 40);
+});
+
+test("skipped files use plain-language notices and never imply analysis", () => {
+  const message = describeSkips({
+    skipped: 3,
+    reasons: {
+      hidden: 1,
+      locked_or_unreadable: 1,
+      system_file: 1,
+      protected_or_special_directory: 2,
+    },
+    truncated: false,
+  });
+  assert.match(message, /3 files were left untouched and not analyzed/i);
+  assert.match(message, /hidden files/i);
+  assert.match(message, /could not be opened/i);
+  assert.match(message, /system files/i);
+  assert.doesNotMatch(message, /protected_or_special_directory/);
+  assert.equal(skipReasonLabel("organizer_metadata"), "Sortly metadata files");
+  assert.equal(skipReasonLabel("custom_limit"), "custom limit");
+
+  const truncated = describeSkips({
+    skipped: 1,
+    reasons: { file_count_limit: 1 },
+    truncated: true,
+  });
+  assert.match(truncated, /^1 file was left untouched and not analyzed/i);
+  assert.match(truncated, /file-count limit was reached/i);
 });

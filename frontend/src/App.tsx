@@ -36,12 +36,14 @@ import { Button } from "./components/ui/button";
 import sortlyMark from "./assets/sortly-mark.svg";
 import { fetchJson } from "./lib/api";
 import {
+  describeSkips,
   filterReviewGroups,
   getFileReviewStatus,
   getInitialGroupLimit,
   getReviewBatchMode,
   shouldExpandGroupsInitially,
   shouldShowReviewTools,
+  skipReasonLabel,
   summarizeFileWarning,
   summarizeGroup,
   summarizeReview,
@@ -595,7 +597,7 @@ export default function App() {
               {error && <Notice tone="error" text={error} />}
               {apiRuntime.state === "error" && <Notice tone="error" text={`Local API unavailable. ${apiRuntime.detail ?? ""}`.trim()} />}
               {preview && preview.scan_summary.skipped > 0 && (
-                <Notice tone="error" text={`${preview.scan_summary.skipped} files were skipped by scan safety limits${preview.scan_summary.truncated ? " and the file-count limit was reached" : ""}.`} />
+                <Notice tone="warning" text={describeSkips(preview.scan_summary)} />
               )}
               {preview?.plan_warnings.map((warning) => <Notice key={warning} tone="error" text={warning} />)}
             </AnimatePresence>
@@ -1015,7 +1017,7 @@ function PreviewSummary({ preview, stats, groupCount }: {
       {(skippedReasons.length > 0 || preview.scan_summary.truncated) && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-warning/20 bg-warning-soft px-5 py-3 text-xs text-warning">
           {preview.scan_summary.truncated && <span>File-count safety limit reached.</span>}
-          {skippedReasons.map(([reason, count]) => <span key={reason}>{count} skipped: {reason}</span>)}
+          {skippedReasons.map(([reason, count]) => <span key={reason}>{count} skipped: {skipReasonLabel(reason)}</span>)}
         </div>
       )}
     </motion.section>
@@ -1251,17 +1253,18 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
   );
 });
 
-function Notice({ tone, text }: { tone: "success" | "error"; text: string }) {
+function Notice({ tone, text }: { tone: "success" | "error" | "warning"; text: string }) {
   const success = tone === "success";
+  const warning = tone === "warning";
   const reducedMotion = useReducedMotion();
   return <motion.div
     initial={reducedMotion ? false : { opacity: 0, y: 5 }}
     animate={{ opacity: 1, y: 0 }}
     exit={reducedMotion ? undefined : { opacity: 0 }}
     transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }}
-    className={`mt-4 flex items-start gap-2 rounded-lg border p-3 text-sm ${success ? "border-success/25 bg-success-soft text-success" : "border-danger/25 bg-danger-soft text-danger"}`}
+    className={`mt-4 flex items-start gap-2 rounded-lg border p-3 text-sm ${success ? "border-success/25 bg-success-soft text-success" : warning ? "border-warning/25 bg-warning-soft text-warning" : "border-danger/25 bg-danger-soft text-danger"}`}
   >
-    {success ? <Check size={16} className="mt-0.5" /> : <X size={16} className="mt-0.5" />}<span>{text}</span>
+    {success ? <Check size={16} className="mt-0.5" /> : warning ? <ShieldCheck size={16} className="mt-0.5" /> : <X size={16} className="mt-0.5" />}<span>{text}</span>
   </motion.div>;
 }
 
