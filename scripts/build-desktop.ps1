@@ -6,7 +6,9 @@ $cargo = Join-Path $cargoHome "bin\cargo.exe"
 $rustupHome = Join-Path $projectRoot ".rustup"
 $tauri = Join-Path $projectRoot "node_modules\.bin\tauri.cmd"
 $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+$python = Get-Command python.exe -ErrorAction SilentlyContinue
 $pyInstallerPython = Join-Path $projectRoot ".pyinstaller-venv\Scripts\python.exe"
+$buildRequirements = Join-Path $projectRoot "requirements-build.txt"
 
 function Remove-GeneratedPath([string]$Path) {
     $fullProjectRoot = [IO.Path]::GetFullPath($projectRoot).TrimEnd("\") + "\"
@@ -25,8 +27,27 @@ if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $tauri -PathType Leaf)) {
     throw "Tauri CLI is missing. Run npm install in the project root."
 }
+if (-not $python) {
+    throw "Python is missing from PATH. Install Python 3.10 or newer before building."
+}
+& $python.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Python 3.10 or newer is required to build the sidecar."
+}
 if (-not (Test-Path -LiteralPath $pyInstallerPython -PathType Leaf)) {
-    throw "PyInstaller environment is missing at $pyInstallerPython. Create it and install requirements-build.txt."
+    Write-Output "Creating the Python build environment..."
+    & $python.Source -m venv (Split-Path -Parent (Split-Path -Parent $pyInstallerPython))
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create the Python build environment."
+    }
+}
+if (-not (Test-Path -LiteralPath $buildRequirements -PathType Leaf)) {
+    throw "Build requirements are missing at $buildRequirements."
+}
+Write-Output "Installing Python sidecar and build dependencies..."
+& $pyInstallerPython -m pip install --disable-pip-version-check --requirement $buildRequirements
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install Python sidecar and build dependencies."
 }
 & $pyInstallerPython -m PyInstaller --version *> $null
 if ($LASTEXITCODE -ne 0) {
@@ -64,6 +85,10 @@ if (-not (Test-Path -LiteralPath $builtSidecar -PathType Leaf)) {
 }
 
 & (Join-Path $PSScriptRoot "stage-sidecar.ps1")
+$stagedSidecar = Join-Path $projectRoot "src-tauri\binaries\sortly-api\sortly-api.exe"
+if (-not (Test-Path -LiteralPath $stagedSidecar -PathType Leaf)) {
+    throw "Sidecar staging completed without producing $stagedSidecar."
+}
 & (Join-Path $PSScriptRoot "prepare-nsis.ps1")
 
 $command = (

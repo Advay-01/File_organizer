@@ -20,4 +20,7 @@ if (Test-Path -LiteralPath $destinationDir) {
 }
 New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
 Copy-Item -Path (Join-Path $source "*") -Destination $destinationDir -Recurse -Force
+if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+    throw "Sidecar staging failed to produce $destination."
+}
 Write-Output "Staged sidecar: $destination"

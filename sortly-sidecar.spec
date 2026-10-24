@@ -6,9 +6,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 PROJECT_ROOT = Path(SPECPATH).resolve()
 
-# Uvicorn loads protocol modules dynamically. Litellm discovers provider modules
-# dynamically too, so include both sets to preserve existing provider behavior.
-hiddenimports = collect_submodules("uvicorn") + collect_submodules("litellm")
+# Uvicorn loads the selected loop, lifespan, and HTTP protocol modules
+# dynamically. LiteLLM discovers provider integrations dynamically, so retain
+# its complete provider surface for models not handled by direct HTTP.
+hiddenimports = (
+    collect_submodules("uvicorn.loops")
+    + collect_submodules("uvicorn.lifespan")
+    + collect_submodules("uvicorn.protocols")
+    + collect_submodules("litellm")
+)
 datas = collect_data_files("litellm")
 
 a = Analysis(
