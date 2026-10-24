@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowDown, ArrowUp, Check, LoaderCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AlertTriangle, ArrowDown, ArrowUp, Check, LoaderCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { fetchJson } from "../lib/api";
 import { Button } from "./ui/button";
 
 type ProviderDefinition = {
@@ -37,6 +38,7 @@ type DraftRow = {
   models: string[];
   discovering: boolean;
   discovery_message: string;
+  discovery_state: "" | "success" | "error";
 };
 
 type TestResult = {
@@ -49,19 +51,28 @@ type TestResult = {
 
 interface Props {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange?: (open: boolean) => void;
   apiBase: string;
+  presentation?: "dialog" | "page";
 }
 
+interface StudioNotice {
+  tone: "success" | "warning";
+  text: string;
+}
+
+const API_KEY_SOURCE_LABELS: Record<SafeConnection["api_key_source"], string> = {
+  stored: "Stored securely",
+  environment: "Environment",
+  missing: "Not set",
+};
+
 async function api<T>(base: string, path: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${base}${path}`, {
+  return fetchJson<T>(`${base}${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const payload = await response.json() as T & { detail?: string };
-  if (!response.ok) throw new Error(payload.detail ?? `Request failed with HTTP ${response.status}.`);
-  return payload;
+  }, "The Provider Studio request failed.");
 }
 
 function makeRow(provider: string, config?: ProviderConfig): DraftRow {
@@ -77,6 +88,7 @@ function makeRow(provider: string, config?: ProviderConfig): DraftRow {
     models: [],
     discovering: false,
     discovery_message: "",
+    discovery_state: "",
   };
 }
 
@@ -94,7 +106,28 @@ function payloadFor(primary: DraftRow, fallbacks: DraftRow[]) {
   };
 }
 
-export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
+function draftSignature(primary: DraftRow, fallbacks: DraftRow[]) {
+  const fields = (row: DraftRow) => ({
+    provider: row.provider,
+    model: row.model,
+    base_url: row.base_url,
+    clear_api_key: row.clear_api_key,
+    has_new_api_key: Boolean(row.api_key),
+  });
+  return JSON.stringify({
+    primary: fields(primary),
+    fallbacks: fallbacks.map(fields),
+  });
+}
+
+function credentialSourceLabel(source: string | undefined) {
+  if (source === "stored" || source === "environment" || source === "missing") {
+    return API_KEY_SOURCE_LABELS[source];
+  }
+  return "Unavailable";
+}
+
+export default function ProviderStudio({ open, onOpenChange, apiBase, presentation = "dialog" }: Props) {
   const [definitions, setDefinitions] = useState<ProviderDefinition[]>([]);
   const [savedConfig, setSavedConfig] = useState<ProviderConfig | null>(null);
   const [primary, setPrimary] = useState<DraftRow>(() => makeRow("openai"));
@@ -103,8 +136,9 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<StudioNotice | null>(null);
   const [results, setResults] = useState<TestResult[]>([]);
+  const [savedDraftSignature, setSavedDraftSignature] = useState<string | null>(null);
 
   function setPrimaryRow(next: DraftRow) {
     setPrimary(next);
@@ -116,14 +150,21 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
     let active = true;
     setLoading(true);
     setError("");
+    setNotice(null);
+    setResults([]);
+    setSavedConfig(null);
+    setSavedDraftSignature(null);
     api<ProviderConfig>(apiBase, "/api/providers/config")
       .then((config) => {
         if (!active) return;
         setDefinitions(config.providers);
         setSavedConfig(config);
         const primaryProvider = config.primary ?? config.providers[0]?.id ?? "openai";
-        setPrimary(makeRow(primaryProvider, config));
-        setFallbacks(config.fallbacks.map((provider) => makeRow(provider, config)));
+        const nextPrimary = makeRow(primaryProvider, config);
+        const nextFallbacks = config.fallbacks.map((provider) => makeRow(provider, config));
+        setPrimary(nextPrimary);
+        setFallbacks(nextFallbacks);
+        setSavedDraftSignature(draftSignature(nextPrimary, nextFallbacks));
       })
       .catch((caught) => {
         if (active) setError(caught instanceof Error ? caught.message : "Could not load provider settings.");
@@ -141,14 +182,17 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
   async function save(): Promise<boolean> {
     setSaving(true);
     setError("");
-    setNotice("");
+    setNotice(null);
     try {
       const config = await api<ProviderConfig>(apiBase, "/api/providers/config", payloadFor(primary, fallbacks));
       setDefinitions(config.providers);
       setSavedConfig(config);
-      setPrimary((row) => makeRow(row.provider, config));
-      setFallbacks((rows) => rows.map((row) => makeRow(row.provider, config)));
-      setNotice("Provider configuration saved securely.");
+      const nextPrimary = makeRow(config.primary ?? primary.provider, config);
+      const nextFallbacks = config.fallbacks.map((provider) => makeRow(provider, config));
+      setPrimary(nextPrimary);
+      setFallbacks(nextFallbacks);
+      setSavedDraftSignature(draftSignature(nextPrimary, nextFallbacks));
+      setNotice({ tone: "success", text: "Provider configuration saved securely." });
       return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save provider settings.");
@@ -166,7 +210,10 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
     try {
       const result = await api<{ ok: boolean; results: TestResult[] }>(apiBase, "/api/providers/test", {});
       setResults(result.results);
-      setNotice(result.ok ? "Active provider configuration verified." : "One or more configured models failed verification.");
+      setNotice({
+        tone: result.ok ? "success" : "warning",
+        text: result.ok ? "Active provider configuration verified." : "One or more configured models failed verification.",
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not test the active provider configuration.");
     } finally {
@@ -175,7 +222,7 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
   }
 
   async function discover(row: DraftRow, setRow: (row: DraftRow) => void) {
-    setRow(updateRow(row, { discovering: true, discovery_message: "" }));
+    setRow(updateRow(row, { discovering: true, discovery_message: "", discovery_state: "" }));
     try {
       const result = await api<{ models: string[]; verified: boolean }>(apiBase, "/api/providers/models", {
         provider: row.provider,
@@ -187,98 +234,133 @@ export default function ProviderStudio({ open, onOpenChange, apiBase }: Props) {
         discovering: false,
         models: result.models,
         discovery_message: `${result.models.length} model IDs retrieved from the provider API. Use Test Connection to verify this selection.`,
+        discovery_state: "success",
       }));
     } catch (caught) {
       setRow(updateRow(row, {
         discovering: false,
         models: [],
         discovery_message: caught instanceof Error ? caught.message : "Model discovery failed.",
+        discovery_state: "error",
       }));
     }
   }
 
   const used = new Set([primary.provider, ...fallbacks.map((row) => row.provider)]);
   const unused = definitions.filter((provider) => !used.has(provider.id));
+  const currentDraftSignature = useMemo(() => draftSignature(primary, fallbacks), [fallbacks, primary]);
+  const hasUnsavedChanges = savedDraftSignature !== null && currentDraftSignature !== savedDraftSignature;
+
+  const studio = (
+    <>
+      <div className="provider-heading">
+        <div>
+          {presentation === "page"
+            ? <h2 id="provider-configuration-heading" className="font-display text-lg font-semibold tracking-tight">Provider configuration</h2>
+            : <Dialog.Title className="font-display text-xl font-semibold tracking-tight">Provider Studio</Dialog.Title>}
+          {presentation === "page"
+            ? <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the exact provider and model used by Analyze. Credentials stay in the Python backend and are encrypted with Windows DPAPI.</p>
+            : <Dialog.Description className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the exact provider and model used by Analyze. Credentials stay in the Python backend and are encrypted with Windows DPAPI.</Dialog.Description>}
+        </div>
+        <div className="provider-heading-actions">
+          {!loading && savedConfig && (
+            <span className="provider-config-state" data-configured={savedConfig.configured} data-dirty={hasUnsavedChanges}>
+              {hasUnsavedChanges ? <AlertTriangle size={13} /> : savedConfig.configured ? <Check size={13} /> : null}
+              {hasUnsavedChanges ? "Unsaved changes" : savedConfig.configured ? "Configuration saved" : "Not configured"}
+            </span>
+          )}
+          {presentation === "dialog" && (
+            <Dialog.Close asChild><Button variant="ghost" size="sm" aria-label="Close Provider Studio"><X size={17} /></Button></Dialog.Close>
+          )}
+        </div>
+      </div>
+
+      {error && <div className="provider-feedback" data-tone="danger" role="alert"><X size={16} /><span>{error}</span></div>}
+      {notice && <div className="provider-feedback" data-tone={notice.tone} role="status">{notice.tone === "success" ? <Check size={16} /> : <X size={16} />}<span>{notice.text}</span></div>}
+
+      {loading ? (
+        <div className="provider-loading" role="status">
+          <LoaderCircle className="animate-spin" size={18} />
+          <div><strong>Loading saved configuration</strong><span>Reading provider settings from the local service.</span></div>
+        </div>
+      ) : (
+        <div className="mt-6 space-y-5">
+          <ConnectionEditor
+            title="Primary provider"
+            row={primary}
+            savedConfig={savedConfig}
+            definitions={definitions}
+            used={used}
+            onChange={setPrimaryRow}
+            onDiscover={() => discover(primary, setPrimaryRow)}
+          />
+
+          {fallbacks.map((row, index) => (
+            <div key={`${row.provider}-${index}`} className="provider-fallback">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <span className="ui-eyebrow text-ink-muted">Fallback {index + 1}</span>
+                  <span className="provider-fallback-name">{definitions.find((item) => item.id === row.provider)?.label ?? row.provider}</span>
+                </div>
+                <div className="flex gap-1">
+                  <Button variant="ghost" size="sm" aria-label={`Move fallback ${index + 1} up`} disabled={index === 0} onClick={() => setFallbacks((current) => {
+                    const copy = [...current]; [copy[index - 1], copy[index]] = [copy[index], copy[index - 1]]; return copy;
+                  })}><ArrowUp size={14} /></Button>
+                  <Button variant="ghost" size="sm" aria-label={`Move fallback ${index + 1} down`} disabled={index === currentLast(fallbacks)} onClick={() => setFallbacks((current) => {
+                    const copy = [...current]; [copy[index + 1], copy[index]] = [copy[index], copy[index + 1]]; return copy;
+                  })}><ArrowDown size={14} /></Button>
+                  <Button variant="ghost" size="sm" aria-label={`Remove fallback ${index + 1}`} onClick={() => setFallbacks((current) => current.filter((_, i) => i !== index))}><Trash2 size={14} /></Button>
+                </div>
+              </div>
+              <ConnectionEditor
+                row={row}
+                savedConfig={savedConfig}
+                definitions={definitions}
+                used={used}
+                onChange={(next) => setFallbacks((current) => current.map((item, i) => i === index ? next : item))}
+                onDiscover={() => discover(row, (next) => setFallbacks((current) => current.map((item, i) => i === index ? next : item)))}
+              />
+            </div>
+          ))}
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+            <Button variant="secondary" size="sm" disabled={!unused.length} onClick={() => {
+              const first = unused[0];
+              if (first) setFallbacks((current) => [...current, makeRow(first.id, savedConfig ?? undefined)]);
+            }}><Plus size={14} /> Add explicit fallback</Button>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={() => void save()} disabled={saving || testing}>{saving && <LoaderCircle size={15} className="animate-spin" />} Save configuration</Button>
+              <Button onClick={() => void testConnection()} disabled={saving || testing}>
+                {testing && <LoaderCircle size={15} className="animate-spin" />} Test saved configuration
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {results.length > 0 && <div className="provider-results">{results.map((result) => (
+        <div key={`${result.provider}/${result.model}`} className="provider-result" data-ok={result.ok}>
+          <div className="flex items-center gap-2">
+            {result.ok ? <Check size={15} className="text-success" /> : <X size={15} className="text-danger" />}
+            <span className="font-medium text-ink">{result.provider}/{result.model}</span>
+            <span className={result.ok ? "text-success" : "text-danger"}>{result.ok ? "verified" : "failed"}</span>
+          </div>
+          <p className="mt-1 break-words text-xs text-ink-muted">{result.ok ? result.response : result.error}</p>
+        </div>
+      ))}</div>}
+    </>
+  );
+
+  if (presentation === "page") {
+    return <div aria-labelledby="provider-configuration-heading">{studio}</div>;
+  }
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/75 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[min(94vw,58rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-white/10 bg-[#18181f] p-6 shadow-2xl focus:outline-none">
-          <div className="flex items-start justify-between gap-6">
-            <div>
-              <Dialog.Title className="text-xl font-semibold">Provider Studio</Dialog.Title>
-              <Dialog.Description className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
-                Choose the exact provider and model used by Analyze. Credentials stay in the Python backend and are encrypted with Windows DPAPI.
-              </Dialog.Description>
-            </div>
-            <Dialog.Close asChild><Button variant="ghost" size="sm" aria-label="Close Provider Studio"><X size={17} /></Button></Dialog.Close>
-          </div>
-
-          {loading ? <div className="mt-10 flex items-center gap-2 text-sm text-zinc-400"><LoaderCircle className="animate-spin" size={16} /> Loading saved configuration…</div> : (
-            <div className="mt-6 space-y-5">
-              <ConnectionEditor
-                title="Primary provider"
-                row={primary}
-                savedConfig={savedConfig}
-                definitions={definitions}
-                used={used}
-                onChange={setPrimaryRow}
-                onDiscover={() => discover(primary, setPrimaryRow)}
-              />
-
-              {fallbacks.map((row, index) => (
-                <div key={`${row.provider}-${index}`} className="rounded-xl border border-white/[0.08] p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Fallback {index + 1}</span>
-                    <div className="flex gap-1">
-                      <Button variant="ghost" size="sm" disabled={index === 0} onClick={() => setFallbacks((current) => {
-                        const copy = [...current]; [copy[index - 1], copy[index]] = [copy[index], copy[index - 1]]; return copy;
-                      })}><ArrowUp size={14} /></Button>
-                      <Button variant="ghost" size="sm" disabled={index === currentLast(fallbacks)} onClick={() => setFallbacks((current) => {
-                        const copy = [...current]; [copy[index + 1], copy[index]] = [copy[index], copy[index + 1]]; return copy;
-                      })}><ArrowDown size={14} /></Button>
-                      <Button variant="ghost" size="sm" onClick={() => setFallbacks((current) => current.filter((_, i) => i !== index))}><Trash2 size={14} /></Button>
-                    </div>
-                  </div>
-                  <ConnectionEditor
-                    row={row}
-                    savedConfig={savedConfig}
-                    definitions={definitions}
-                    used={used}
-                    onChange={(next) => setFallbacks((current) => current.map((item, i) => i === index ? next : item))}
-                    onDiscover={() => discover(row, (next) => setFallbacks((current) => current.map((item, i) => i === index ? next : item)))}
-                  />
-                </div>
-              ))}
-
-              <div className="flex items-center justify-between border-t border-white/[0.07] pt-4">
-                <Button variant="secondary" size="sm" disabled={!unused.length} onClick={() => {
-                  const first = unused[0];
-                  if (first) setFallbacks((current) => [...current, makeRow(first.id, savedConfig ?? undefined)]);
-                }}><Plus size={14} /> Add explicit fallback</Button>
-                <div className="flex gap-2">
-                  <Button variant="secondary" onClick={() => void save()} disabled={saving || testing}>{saving && <LoaderCircle size={15} className="animate-spin" />} Save</Button>
-                  <Button onClick={() => void testConnection()} disabled={saving || testing}>
-                    {testing && <LoaderCircle size={15} className="animate-spin" />} Test active configuration
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {error && <p role="alert" className="mt-4 rounded-lg border border-red-400/20 bg-red-400/[0.06] p-3 text-sm text-red-300">{error}</p>}
-          {notice && <p role="status" className="mt-4 text-sm text-violet-300">{notice}</p>}
-          {results.length > 0 && <div className="mt-4 space-y-2">{results.map((result) => (
-            <div key={`${result.provider}/${result.model}`} className="rounded-lg border border-white/[0.08] bg-black/20 p-3 text-sm">
-              <div className="flex items-center gap-2">
-                {result.ok ? <Check size={15} className="text-emerald-400" /> : <X size={15} className="text-red-400" />}
-                <span className="font-medium">{result.provider}/{result.model}</span>
-                <span className={result.ok ? "text-emerald-300" : "text-red-300"}>{result.ok ? "verified" : "failed"}</span>
-              </div>
-              <p className="mt-1 break-words text-xs text-zinc-500">{result.ok ? result.response : result.error}</p>
-            </div>
-          ))}</div>}
+        <Dialog.Overlay className="ui-overlay fixed inset-0 z-40" />
+        <Dialog.Content className="ui-dialog fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[min(94vw,58rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto p-6 focus:outline-none">
+          {studio}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -300,22 +382,36 @@ function ConnectionEditor({ title, row, savedConfig, definitions, used, onChange
 }) {
   const definition = definitions.find((item) => item.id === row.provider);
   const listId = `provider-models-${row.provider}-${row.model}`;
+  const credentialNote = !definition?.requires_key
+    ? "This provider does not require an API key."
+    : row.has_api_key
+      ? row.api_key_source === "environment"
+        ? "Using a key from the environment. Leave blank to keep this configuration."
+        : row.api_key_source === "stored"
+          ? "A key is stored securely. Leave blank to keep it."
+          : "The credential source is unavailable. Leave blank to keep the current configuration."
+      : "No key is stored. Enter one to use this provider.";
   return (
-    <div className="space-y-3">
-      {title && <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">{title}</p>}
+    <div className="provider-editor">
+      {title && (
+        <div className="provider-section-heading">
+          <p className="ui-eyebrow text-ink-muted">{title}</p>
+          <span className="provider-name">{definition?.label ?? row.provider}</span>
+        </div>
+      )}
       <div className="grid gap-3 md:grid-cols-2">
-        <label className="text-xs text-zinc-400">Provider
+        <label className="text-xs text-ink-soft">Provider
           <select
             value={row.provider}
             onChange={(event) => onChange(makeRow(event.target.value, savedConfig ?? undefined))}
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-400/60"
+            className="ui-field mt-1 w-full px-3 py-2 text-sm"
           >
             {definitions.filter((item) => item.id === row.provider || !used.has(item.id)).map((item) => (
               <option key={item.id} value={item.id}>{item.label}</option>
             ))}
           </select>
         </label>
-        <label className="text-xs text-zinc-400">Model ID
+        <label className="text-xs text-ink-soft">Model ID
           <input
             value={row.model}
             onChange={(event) => onChange({ ...row, model: event.target.value })}
@@ -327,19 +423,20 @@ function ConnectionEditor({ title, row, savedConfig, definitions, used, onChange
             }}
             list={listId}
             placeholder="Enter the provider's model ID"
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-400/60"
+            className="ui-field mt-1 w-full px-3 py-2 text-sm"
           />
           <datalist id={listId}>{row.models.map((model) => <option key={model} value={model} />)}</datalist>
         </label>
-        <label className="text-xs text-zinc-400">API endpoint <span className="text-zinc-600">(optional)</span>
+        <label className="text-xs text-ink-soft">API endpoint <span className="text-ink-faint">(optional)</span>
           <input
             value={row.base_url}
             onChange={(event) => onChange({ ...row, base_url: event.target.value })}
             placeholder={definition?.default_base_url ?? ""}
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-400/60"
+            className="ui-field mt-1 w-full px-3 py-2 text-sm"
           />
         </label>
-        <label className="text-xs text-zinc-400">API key
+        <label className="text-xs text-ink-soft">API key
+          <span className="provider-field-note">Write-only</span>
           <input
             type="password"
             autoComplete="off"
@@ -347,18 +444,25 @@ function ConnectionEditor({ title, row, savedConfig, definitions, used, onChange
             onChange={(event) => onChange({ ...row, api_key: event.target.value })}
             placeholder={row.has_api_key ? "Stored securely; leave blank to keep" : definition?.requires_key ? "Enter provider API key" : "Not required for Ollama"}
             disabled={!definition?.requires_key}
-            className="mt-1 w-full rounded-lg border border-white/10 bg-[#0e0e12] px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-violet-400/60 disabled:opacity-50"
+            className="ui-field mt-1 w-full px-3 py-2 text-sm"
           />
+          <span className="provider-field-help">{credentialNote}</span>
         </label>
       </div>
-      <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+      <div className="provider-editor-actions">
         <Button variant="secondary" size="sm" onClick={onDiscover} disabled={row.discovering}>
-          {row.discovering ? <LoaderCircle size={13} className="animate-spin" /> : <RefreshCw size={13} />} Refresh models
+          {row.discovering ? <LoaderCircle size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+          {row.discovering ? "Refreshing models…" : "Refresh models"}
         </Button>
-        {row.has_api_key && <label className="flex items-center gap-2"><input type="checkbox" checked={row.clear_api_key} onChange={(event) => onChange({ ...row, clear_api_key: event.target.checked })} /> Clear stored key</label>}
-        {row.has_api_key && <span>Credential source: {row.api_key_source}</span>}
-        {row.discovery_message && <span className="min-w-full break-words">{row.discovery_message}</span>}
+        {row.has_api_key && row.api_key_source === "stored" && <label className="provider-checkbox"><input type="checkbox" checked={row.clear_api_key} onChange={(event) => onChange({ ...row, clear_api_key: event.target.checked })} /> Clear stored key</label>}
+        {row.has_api_key && <span className="provider-source">Source: {credentialSourceLabel(row.api_key_source)}</span>}
       </div>
+      {row.discovery_message && (
+        <div className="provider-discovery" data-state={row.discovery_state} role="status">
+          {row.discovery_state === "success" ? <Check size={14} /> : <X size={14} />}
+          <span>{row.discovery_message}</span>
+        </div>
+      )}
     </div>
   );
 }

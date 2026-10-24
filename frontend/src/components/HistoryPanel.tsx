@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AlertTriangle, Check, ChevronDown, FolderClock, LoaderCircle, RefreshCw, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchJson } from "../lib/api";
+import { Button } from "./ui/button";
 
 /**
  * Run history with per-run undo. Talks only to the local API (app/history_api.py).
  *
  *   <HistoryPanel folder={selectedFolder} />        // runs for one folder
  *   <HistoryPanel />                                 // runs from every folder organized so far
- *
- * Colours come from CSS variables with fallbacks, so it follows your theme:
- *   --surface, --surface-2, --text, --muted, --accent, --warn, --border
  */
 
 type Status = "applied" | "undone" | "partially undone";
@@ -20,7 +21,7 @@ interface Run {
   folders: Record<string, number>;
   status: Status;
   sample: { from: string; to: string; folder: string }[];
-  folder?: string; // present in the global list
+  folder?: string;
 }
 
 interface Move {
@@ -40,23 +41,35 @@ interface UndoResult {
 interface Props {
   folder?: string;
   apiBase?: string;
-  onChanged?: () => void; // e.g. refresh your file view after an undo
+  onChanged?: () => void;
+}
+
+interface UndoNotice {
+  tone: "success" | "warning";
+  text: string;
 }
 
 const MAX_MOVES_SHOWN = 100;
 
+const STATUS_LABELS: Record<Status, string> = {
+  applied: "Completed",
+  undone: "Undone",
+  "partially undone": "Partially undone",
+};
+
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      detail = (await res.json()).detail ?? detail;
-    } catch {
-      /* keep statusText */
-    }
-    throw new Error(detail);
+  return fetchJson<T>(url, init, "The History request failed.");
+}
+
+function formatTimestamp(value: string) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) {
+    return { date: "Unknown date", time: value || "Time unavailable" };
   }
-  return res.json() as Promise<T>;
+  return {
+    date: date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }),
+    time: date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }),
+  };
 }
 
 export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765", onChanged }: Props) {
@@ -64,167 +77,234 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [moves, setMoves] = useState<Move[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<UndoNotice | null>(null);
+  const detailRequest = useRef(0);
+  const reducedMotion = useReducedMotion();
 
-  const keyOf = (r: Run) => `${r.folder ?? folder ?? ""}#${r.id}`;
-  const folderOf = (r: Run) => r.folder ?? folder ?? "";
+  const keyOf = (run: Run) => `${run.folder ?? folder ?? ""}#${run.id}`;
+  const folderOf = (run: Run) => run.folder ?? folder ?? "";
 
   const load = useCallback(async () => {
     try {
-      const q = folder ? `?folder=${encodeURIComponent(folder)}` : "";
-      setRuns(await api<Run[]>(`${apiBase}/history${q}`));
+      const query = folder ? `?folder=${encodeURIComponent(folder)}` : "";
+      setRuns(await api<Run[]>(`${apiBase}/history${query}`));
       setError(null);
-    } catch (e) {
-      // a folder with no history yet is not an error worth shouting about
-      const msg = e instanceof Error ? e.message : String(e);
-      if (folder && msg.includes("No history")) setRuns([]);
-      else setError(msg);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      if (folder && message.includes("No history")) setRuns([]);
+      else setError(message);
     }
   }, [apiBase, folder]);
 
   useEffect(() => {
     setRuns(null);
     setOpen(null);
+    setNotice(null);
     void load();
   }, [load]);
 
-  const toggle = async (r: Run) => {
-    const k = keyOf(r);
-    if (open === k) return setOpen(null);
-    setOpen(k);
+  const toggle = async (run: Run) => {
+    const key = keyOf(run);
+    if (open === key) {
+      detailRequest.current += 1;
+      setOpen(null);
+      setDetailLoading(false);
+      return;
+    }
+
+    const requestId = ++detailRequest.current;
+    setOpen(key);
     setMoves([]);
+    setDetailLoading(true);
+    setError(null);
     try {
-      const d = await api<{ moves: Move[] }>(
-        `${apiBase}/history/${r.id}?folder=${encodeURIComponent(folderOf(r))}`,
+      const detail = await api<{ moves: Move[] }>(
+        `${apiBase}/history/${run.id}?folder=${encodeURIComponent(folderOf(run))}`,
       );
-      setMoves(d.moves);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (detailRequest.current === requestId) setMoves(detail.moves);
+    } catch (caught) {
+      if (detailRequest.current === requestId) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      if (detailRequest.current === requestId) setDetailLoading(false);
     }
   };
 
-  const undo = async (r: Run) => {
-    const ok = window.confirm(
-      `Move ${r.files} file${r.files === 1 ? "" : "s"} back to where they were?\n` +
+  const undo = async (run: Run) => {
+    const confirmed = window.confirm(
+      `Move ${run.files} file${run.files === 1 ? "" : "s"} back to where they were?\n` +
         "Files you have since moved or deleted are left alone.",
     );
-    if (!ok) return;
-    const k = keyOf(r);
-    setBusy(k);
+    if (!confirmed) return;
+
+    const key = keyOf(run);
+    setBusy(key);
     setNotice(null);
+    setError(null);
     try {
-      const res = await api<UndoResult>(`${apiBase}/history/${r.id}/undo`, {
+      const result = await api<UndoResult>(`${apiBase}/history/${run.id}/undo`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder: folderOf(r) }),
+        body: JSON.stringify({ folder: folderOf(run) }),
       });
-      const skipped = res.skipped.length
-        ? ` ${res.skipped.length} skipped (${res.skipped[0].file}: ${res.skipped[0].reason}).`
+      const skipped = result.skipped.length
+        ? ` ${result.skipped.length} skipped (${result.skipped[0].file}: ${result.skipped[0].reason}).`
         : "";
-      setNotice(`Restored ${res.restored} file${res.restored === 1 ? "" : "s"}.${skipped}`);
+      setNotice({
+        tone: result.status === "undone" ? "success" : "warning",
+        text: `Restored ${result.restored} file${result.restored === 1 ? "" : "s"}.${skipped}`,
+      });
       await load();
+      detailRequest.current += 1;
       setOpen(null);
       onChanged?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy(null);
     }
   };
 
   return (
-    <section className="hp">
-      <style>{CSS}</style>
-      <header className="hp-head">
-        <h3>History</h3>
-        <button className="hp-btn" onClick={() => void load()}>Refresh</button>
+    <section className="history-panel" aria-labelledby="history-panel-heading">
+      <header className="history-toolbar">
+        <div>
+          <p className="ui-eyebrow text-ink-muted">Saved runs</p>
+          <h2 id="history-panel-heading" className="history-title">Operation history</h2>
+          <p className="history-intro">Each run preserves its original move path so you can review before undoing.</p>
+        </div>
+        <Button variant="secondary" size="sm" onClick={() => void load()}>
+          <RefreshCw size={14} /> Refresh
+        </Button>
       </header>
 
-      {notice && <p className="hp-note" role="status">{notice}</p>}
-      {error && <p className="hp-err" role="alert">{error}</p>}
-      {runs === null && !error && <p className="hp-muted">Loading…</p>}
-      {runs !== null && runs.length === 0 && (
-        <p className="hp-muted">No runs yet. Organized folders will show up here, each with its own undo.</p>
+      {notice && (
+        <div className="history-feedback" data-tone={notice.tone} role="status">
+          {notice.tone === "success" ? <Check size={16} /> : <AlertTriangle size={16} />}
+          <span>{notice.text}</span>
+        </div>
+      )}
+      {error && (
+        <div className="history-feedback" data-tone="danger" role="alert">
+          <AlertTriangle size={16} />
+          <span>{error}</span>
+        </div>
       )}
 
-      <ul className="hp-list">
-        {runs?.map((r) => {
-          const k = keyOf(r);
-          const top = Object.entries(r.folders).slice(0, 3);
-          return (
-            <li key={k} className="hp-card">
-              <button className="hp-row" onClick={() => void toggle(r)} aria-expanded={open === k}>
-                <span className="hp-main">
-                  <strong>{r.files} file{r.files === 1 ? "" : "s"}</strong>
-                  {r.renamed > 0 && <span className="hp-chip">{r.renamed} renamed</span>}
-                  <span className={`hp-status hp-${r.status.replace(" ", "-")}`}>{r.status}</span>
-                </span>
-                <span className="hp-sub">
-                  {r.time ? new Date(r.time).toLocaleString() : "unknown time"}
-                  {r.folder ? ` · ${r.folder}` : ""}
-                </span>
-                <span className="hp-sub">
-                  {top.map(([name, n]) => `${name} (${n})`).join(", ")}
-                  {Object.keys(r.folders).length > 3 ? " …" : ""}
-                </span>
-              </button>
+      {runs === null && !error && (
+        <div className="history-state" role="status">
+          <LoaderCircle size={18} className="animate-spin text-accent-text" />
+          <div><strong>Loading operation history</strong><span>Reading local run records…</span></div>
+        </div>
+      )}
 
-              {open === k && (
-                <div className="hp-detail">
-                  {moves.length === 0 && <p className="hp-muted">Loading…</p>}
-                  <ul>
-                    {moves.slice(0, MAX_MOVES_SHOWN).map((m, i) => (
-                      <li key={i} className={m.restored ? "hp-done" : ""}>
-                        <span className="hp-from">{m.from_name}</span>
-                        <span className="hp-arrow">→</span>
-                        <span>{m.folder === "." ? "" : `${m.folder}/`}{m.to_name}</span>
-                        {m.renamed && <span className="hp-chip">renamed</span>}
-                      </li>
-                    ))}
-                  </ul>
-                  {moves.length > MAX_MOVES_SHOWN && (
-                    <p className="hp-muted">…and {moves.length - MAX_MOVES_SHOWN} more</p>
+      {runs !== null && runs.length === 0 && (
+        <div className="history-empty">
+          <span className="history-empty-icon"><FolderClock size={21} /></span>
+          <div>
+            <strong>No completed runs yet</strong>
+            <p>After files are organized, each operation will appear here with its own safe Undo action.</p>
+          </div>
+        </div>
+      )}
+
+      {runs && runs.length > 0 && (
+        <ol className="history-list">
+          {runs.map((run) => {
+            const key = keyOf(run);
+            const expanded = open === key;
+            const timestamp = formatTimestamp(run.time);
+            const folders = Object.entries(run.folders);
+            const visibleFolders = folders.slice(0, 3);
+            return (
+              <li key={key} className="history-run" data-expanded={expanded}>
+                <button
+                  type="button"
+                  className="history-run-trigger"
+                  aria-expanded={expanded}
+                  onClick={() => void toggle(run)}
+                >
+                  <span className="history-run-icon"><FolderClock size={17} /></span>
+                  <span className="history-run-main">
+                    <span className="history-run-heading">
+                      <strong>{run.files} {run.files === 1 ? "file" : "files"}</strong>
+                      {run.renamed > 0 && <span className="history-chip">{run.renamed} renamed</span>}
+                    </span>
+                    <span className="history-run-time" title={run.time}>
+                      <span>{timestamp.date}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{timestamp.time}</span>
+                      {run.folder && <span className="history-folder-path" title={run.folder}>{run.folder}</span>}
+                    </span>
+                    <span className="history-folder-list">
+                      {visibleFolders.map(([name, count]) => <span key={name} className="history-chip">{name} <span>{count}</span></span>)}
+                      {folders.length > visibleFolders.length && <span className="history-chip">+{folders.length - visibleFolders.length} folders</span>}
+                    </span>
+                  </span>
+                  <span className="history-status" data-status={run.status}>{STATUS_LABELS[run.status]}</span>
+                  <ChevronDown size={16} className="history-chevron" data-open={expanded} />
+                </button>
+
+                <AnimatePresence initial={false}>
+                  {expanded && (
+                    <motion.div
+                      className="history-detail-shell"
+                      initial={reducedMotion ? false : { height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={reducedMotion ? undefined : { height: 0, opacity: 0 }}
+                      transition={{ duration: reducedMotion ? 0 : 0.2, ease: "easeOut" }}
+                    >
+                      <div className="history-detail">
+                        <div className="history-detail-heading">
+                          <span>Moves in this run</span>
+                          {!detailLoading && <span>{moves.length} shown</span>}
+                        </div>
+                        {detailLoading && (
+                          <p className="history-detail-loading"><LoaderCircle size={14} className="animate-spin" /> Loading move details…</p>
+                        )}
+                        {!detailLoading && moves.length === 0 && <p className="history-muted">No move details were returned for this run.</p>}
+                        {moves.length > 0 && (
+                          <ul className="history-moves">
+                            {moves.slice(0, MAX_MOVES_SHOWN).map((move, index) => (
+                              <li key={`${move.from_name}-${move.to_name}-${index}`} data-restored={move.restored}>
+                                <span className="history-move-name">{move.from_name}</span>
+                                <span className="history-move-arrow" aria-hidden="true">→</span>
+                                <span className="history-move-name">{move.folder === "." ? "" : `${move.folder}/`}{move.to_name}</span>
+                                {move.renamed && <span className="history-chip">renamed</span>}
+                                {move.restored && <span className="history-chip" data-tone="muted">restored</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {moves.length > MAX_MOVES_SHOWN && (
+                          <p className="history-muted">Showing the first {MAX_MOVES_SHOWN} of {moves.length} recorded moves.</p>
+                        )}
+                        {run.status !== "undone" && (
+                          <div className="history-detail-footer">
+                            <p>Undo only moves files still present at their recorded destinations. Other items are skipped safely.</p>
+                            <Button
+                              size="sm"
+                              variant={run.status === "partially undone" ? "secondary" : "default"}
+                              disabled={busy === key}
+                              onClick={() => void undo(run)}
+                            >
+                              {busy === key ? <LoaderCircle size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                              {busy === key ? "Undoing…" : run.status === "partially undone" ? "Retry remaining" : "Undo this run"}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
                   )}
-                  {r.status !== "undone" && (
-                    <button className="hp-btn hp-primary" disabled={busy === k} onClick={() => void undo(r)}>
-                      {busy === k ? "Undoing…" : r.status === "applied" ? "Undo this run" : "Retry the rest"}
-                    </button>
-                  )}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                </AnimatePresence>
+              </li>
+            );
+          })}
+        </ol>
+      )}
     </section>
   );
 }
-
-const CSS = `
-.hp{color:var(--text,#ece9ff);font:14px/1.45 system-ui,sans-serif}
-.hp-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.hp-head h3{margin:0;font-size:16px}
-.hp-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
-.hp-card{background:var(--surface,#16131f);border:1px solid var(--border,#2a2540);border-radius:10px;overflow:hidden}
-.hp-row{all:unset;box-sizing:border-box;display:grid;gap:2px;width:100%;padding:10px 12px;cursor:pointer}
-.hp-row:hover,.hp-row:focus-visible{background:var(--surface-2,#1d1930)}
-.hp-main{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.hp-sub,.hp-muted{color:var(--muted,#9a93b8);font-size:12.5px}
-.hp-chip{background:var(--surface-2,#241f3a);border-radius:999px;padding:1px 8px;font-size:11.5px}
-.hp-status{margin-left:auto;font-size:12px;border-radius:999px;padding:1px 8px;border:1px solid var(--accent,#7c5cff);color:var(--accent,#7c5cff)}
-.hp-undone{border-color:var(--border,#2a2540);color:var(--muted,#9a93b8)}
-.hp-partially-undone{border-color:var(--warn,#e0a030);color:var(--warn,#e0a030)}
-.hp-detail{border-top:1px solid var(--border,#2a2540);padding:10px 12px}
-.hp-detail ul{list-style:none;margin:0 0 10px;padding:0;max-height:240px;overflow:auto;display:grid;gap:3px}
-.hp-detail li{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;font-size:13px}
-.hp-from{color:var(--muted,#9a93b8)}
-.hp-arrow{color:var(--accent,#7c5cff)}
-.hp-done{opacity:.5;text-decoration:line-through}
-.hp-btn{background:var(--surface-2,#241f3a);color:inherit;border:1px solid var(--border,#2a2540);border-radius:8px;padding:6px 12px;cursor:pointer}
-.hp-btn:disabled{opacity:.6;cursor:default}
-.hp-primary{background:var(--accent,#7c5cff);border-color:var(--accent,#7c5cff);color:#fff}
-.hp-note{color:var(--accent,#7c5cff)}
-.hp-err{color:#ff6b6b}
-`;
-
