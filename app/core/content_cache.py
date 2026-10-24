@@ -6,11 +6,13 @@ import json
 import os
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from app.core.evidence import EvidenceBundle
+from app.models.schemas import FileInfo
 
-CACHE_VERSION = 3
+CACHE_VERSION = 5
 DEFAULT_DB = Path(os.environ.get("ORGANIZER_CACHE_DB", Path.home() / ".file_organizer" / "cache.db"))
 
 
@@ -29,13 +31,22 @@ class ContentIntelligenceCache:
         )
         self._db.commit()
 
-    def get_evidence(self, fingerprint: str) -> EvidenceBundle | None:
+    def get_evidence(self, fingerprint: str, extension: str | None = None) -> EvidenceBundle | None:
         if not fingerprint:
             return None
-        row = self._db.execute(
-            "SELECT payload FROM evidence_cache WHERE fingerprint = ? AND version = ?",
-            (fingerprint, CACHE_VERSION),
-        ).fetchone()
+        if extension is not None:
+            key = f"{fingerprint}:{extension.lower()}"
+            row = self._db.execute(
+                "SELECT payload FROM evidence_cache WHERE fingerprint = ? AND version = ?",
+                (key, CACHE_VERSION),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT payload FROM evidence_cache "
+                "WHERE (fingerprint = ? OR fingerprint LIKE ?) AND version = ? "
+                "ORDER BY created DESC LIMIT 1",
+                (fingerprint, f"{fingerprint}:%", CACHE_VERSION),
+            ).fetchone()
         if not row:
             return None
         try:
@@ -46,9 +57,10 @@ class ContentIntelligenceCache:
     def put_evidence(self, evidence: EvidenceBundle) -> None:
         if not evidence.fingerprint:
             return
+        key = f"{evidence.fingerprint}:{evidence.extension.lower()}"
         self._db.execute(
             "INSERT OR REPLACE INTO evidence_cache(fingerprint, version, payload, created) VALUES (?, ?, ?, ?)",
-            (evidence.fingerprint, CACHE_VERSION, evidence.to_json(), time.time()),
+            (key, CACHE_VERSION, evidence.to_json(), time.time()),
         )
         self._db.commit()
 
@@ -86,6 +98,10 @@ def analysis_cache_key(
         {
             "version": CACHE_VERSION,
             "fingerprint": evidence.fingerprint,
+            "extension": evidence.extension,
+            "detected_type": evidence.detected_type,
+            "detected_type_confidence": evidence.detected_type_confidence,
+            "parser_status": evidence.parser_status,
             "filename": evidence.filename.lower(),
             "models": models,
             "known_folders": sorted(folder.lower() for folder in known_folders),
@@ -99,3 +115,15 @@ def analysis_cache_key(
         sort_keys=True,
     )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def refresh_evidence_identity(evidence: EvidenceBundle, file: FileInfo) -> EvidenceBundle:
+    """Reuse content-derived evidence without retaining another file's identity."""
+    path = Path(file.path)
+    return replace(
+        evidence,
+        path=str(path),
+        filename=path.name,
+        extension=path.suffix.lower(),
+        parent_directory=path.parent.name,
+    )

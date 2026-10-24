@@ -10,11 +10,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List
 
-from app.core.extractor import extract_snippet
+from app.core.extractor import extract_content, extract_snippet
 from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
-EVIDENCE_VERSION = 2
+EVIDENCE_VERSION = 4
 
 
 @dataclass
@@ -29,7 +29,9 @@ class EvidenceBundle:
     sources: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     detected_type: str = "unknown"
+    detected_type_confidence: str = "unknown"
     extension_mismatch: bool = False
+    parser_status: str = "unavailable"
     extraction_status: str = "unavailable"
     ocr_used: bool = False
     sensitive_findings: List[dict] = field(default_factory=list)
@@ -87,7 +89,7 @@ def _zip_type(path: Path) -> str:
         if "mimetype" in names:
             return ".epub"
         return ".zip"
-    except Exception:
+    except (OSError, ValueError, zipfile.BadZipFile):
         return ".zip"
 
 
@@ -129,6 +131,7 @@ def _extensions_match(extension: str, detected: str) -> bool:
         ".tif": ".tiff",
         ".xlsm": ".xlsx",
         ".tgz": ".tar",
+        ".htm": ".html",
     }
     return aliases.get(extension, extension) == aliases.get(detected, detected)
 
@@ -240,15 +243,23 @@ def extract_evidence(
 ) -> EvidenceBundle:
     path = Path(file_info.path)
     fingerprint = fingerprint if fingerprint is not None else (content_fingerprint(path) or "")
-    detected_type = detect_file_type(path)
     extension = path.suffix.lower()
+    signature_type = detect_file_type(path)
+    extraction = extract_content(str(path), max_chars=max_chars)
+    detected_type = signature_type
+    detection_confidence = "high" if signature_type != "unknown" else extraction.detection_confidence
+    if signature_type == "unknown" and extraction.detected_type != "unknown":
+        detected_type = extraction.detected_type
+
     warnings = []
+    if extraction.warning:
+        warnings.append(extraction.warning)
     if detected_type != "unknown" and not _extensions_match(extension, detected_type):
         warnings.append(
             f"Extension {extension or '(none)'} conflicts with detected format {detected_type}."
         )
 
-    content = extract_snippet(str(path), max_chars=max_chars)
+    content = extraction.text
     metadata = _document_metadata(path, extension)
     if metadata.pop("warning", None):
         warnings.append("Metadata could not be fully read; the file may be encrypted or malformed.")
@@ -265,11 +276,18 @@ def extract_evidence(
 
     sources = []
     if content:
-        sources.append("extracted_content" if not ocr_used else "ocr")
+        if extraction.parser_status == "fallback":
+            sources.append("raw_text_fallback")
+        else:
+            sources.append("extracted_content" if not ocr_used else "ocr")
+    if extraction.parser_status == "fallback":
+        sources.append("parser_fallback")
     if metadata:
         sources.append("metadata")
-    if detected_type != "unknown":
+    if signature_type != "unknown":
         sources.append("file_signature")
+    elif extraction.detected_type != "unknown":
+        sources.append("text_format_detection")
     status = "sufficient" if len(content) >= 80 or metadata else (
         "weak" if content or metadata else "unavailable"
     )
@@ -300,7 +318,13 @@ def extract_evidence(
         sources=sources,
         warnings=warnings,
         detected_type=detected_type,
-        extension_mismatch=any("Extension" in warning for warning in warnings),
+        detected_type_confidence=detection_confidence,
+        extension_mismatch=(
+            detected_type != "unknown"
+            and bool(extension)
+            and not _extensions_match(extension, detected_type)
+        ),
+        parser_status=extraction.parser_status,
         extraction_status=status,
         ocr_used=ocr_used,
         sensitive_findings=[finding.to_dict() for finding in findings],

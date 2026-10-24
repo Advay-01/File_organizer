@@ -22,17 +22,33 @@ import {
   Moon,
   Plug,
   RotateCcw,
+  Search,
   Settings2,
   ShieldCheck,
   Sparkles,
   Sun,
   X,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 import HistoryPanel from "./components/HistoryPanel";
 import ProviderStudio from "./components/ProviderStudio";
 import { Button } from "./components/ui/button";
+import sortlyMark from "./assets/sortly-mark.svg";
 import { fetchJson } from "./lib/api";
+import {
+  filterReviewGroups,
+  getFileReviewStatus,
+  getInitialGroupLimit,
+  getReviewBatchMode,
+  shouldExpandGroupsInitially,
+  shouldShowReviewTools,
+  summarizeFileWarning,
+  summarizeGroup,
+  summarizeReview,
+  type ReviewFileStatus,
+  type ReviewFilter,
+  type ReviewStats,
+} from "./lib/review";
 
 const BROWSER_API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
 const DESKTOP = isTauri();
@@ -152,6 +168,10 @@ export default function App() {
   const [riskAcknowledged, setRiskAcknowledged] = useState(false);
   const [activeView, setActiveView] = useState<WorkspaceView>(workspaceViewFromHash);
   const [themePreference, setThemePreference] = useState<ThemePreference>(INITIAL_THEME_PREFERENCE);
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [visibleGroupLimit, setVisibleGroupLimit] = useState(Number.POSITIVE_INFINITY);
   const reducedMotion = useReducedMotion();
   const [apiRuntime, setApiRuntime] = useState<ApiRuntime>(() => ({
     state: DESKTOP ? "starting" : "ready",
@@ -233,8 +253,11 @@ export default function App() {
       grouped.set(file.target_path, [...(grouped.get(file.target_path) ?? []), file]);
     }
     return [...grouped.entries()];
-  }, [fileEdits, preview]);
-  const selectedCount = Object.values(fileEdits).filter((edit) => edit.accepted).length;
+  }, [preview]);
+  const selectedCount = useMemo(
+    () => Object.values(fileEdits).filter((edit) => edit.accepted).length,
+    [fileEdits],
+  );
   const invalidEditCount = useMemo(() => {
     if (!preview) return 0;
     return preview.files.filter((file) => {
@@ -245,11 +268,57 @@ export default function App() {
       return accepted && (!destination.trim() || !filename.trim());
     }).length;
   }, [fileEdits, preview]);
+  const reviewStats = useMemo(
+    () => summarizeReview(preview?.files ?? [], fileEdits),
+    [fileEdits, preview],
+  );
+  const filteredReviewGroups = useMemo(
+    () => filterReviewGroups(groups, fileEdits, reviewQuery, reviewFilter),
+    [fileEdits, groups, reviewFilter, reviewQuery],
+  );
+  const reviewBatchMode = getReviewBatchMode(preview?.files.length ?? 0);
+  const visibleReviewGroups = filteredReviewGroups.slice(0, visibleGroupLimit);
+  const hiddenGroupCount = Math.max(0, filteredReviewGroups.length - visibleReviewGroups.length);
+  const showReviewTools = (
+    shouldShowReviewTools(preview?.files.length ?? 0)
+    || reviewFilter !== "all"
+    || Boolean(reviewQuery)
+  );
+
+  useEffect(() => {
+    if (!preview) {
+      setReviewQuery("");
+      setReviewFilter("all");
+      setExpandedGroups({});
+      setVisibleGroupLimit(Number.POSITIVE_INFINITY);
+      return;
+    }
+    const initiallyOpen = shouldExpandGroupsInitially(preview.files.length);
+    setExpandedGroups(Object.fromEntries(
+      [...new Set(preview.files.map((file) => file.target_path))]
+        .map((target) => [target, initiallyOpen]),
+    ));
+    setReviewQuery("");
+    setReviewFilter("all");
+    setVisibleGroupLimit(getInitialGroupLimit(preview.files.length));
+  }, [preview?.plan_id]);
+
+  useEffect(() => {
+    setVisibleGroupLimit(getInitialGroupLimit(preview?.files.length ?? 0));
+  }, [preview?.files.length, reviewFilter, reviewQuery]);
+
+  const updateFileEdit = useCallback((fileId: string, edit: FileEdit) => {
+    setFileEdits((current) => ({ ...current, [fileId]: edit }));
+  }, []);
 
   function resetPreview() {
     setPreview(null);
     setFileEdits({});
     setRiskAcknowledged(false);
+    setReviewQuery("");
+    setReviewFilter("all");
+    setExpandedGroups({});
+    setVisibleGroupLimit(Number.POSITIVE_INFINITY);
   }
 
   async function chooseFolder() {
@@ -350,14 +419,28 @@ export default function App() {
 
   function toggleTarget(target: string) {
     const files = groups.find(([name]) => name === target)?.[1] ?? [];
-    const allAccepted = files.every((file) => fileEdits[file.id]?.accepted);
+    const allAccepted = files.every((file) => fileEdits[file.id]?.accepted ?? file.selected);
     setFileEdits((current) => {
       const next = { ...current };
       for (const file of files) {
-        next[file.id] = { ...next[file.id], accepted: !allAccepted };
+        next[file.id] = {
+          ...(current[file.id] ?? {
+            accepted: file.selected,
+            target_path: file.target_path,
+            destination_name: file.destination_name,
+          }),
+          accepted: !allAccepted,
+        };
       }
       return next;
     });
+  }
+
+  function toggleReviewGroup(target: string) {
+    setExpandedGroups((current) => ({
+      ...current,
+      [target]: !current[target],
+    }));
   }
 
   async function openFolder() {
@@ -372,10 +455,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen text-ink">
-      <aside className="ui-sidebar app-sidebar fixed inset-y-0 left-0 z-40 flex flex-col border-r px-3 py-5">
-        <div className="mb-8 flex items-center gap-3 px-2">
-          <div className="app-brand-mark grid size-10 shrink-0 place-items-center rounded-lg bg-accent text-accent-ink shadow-[var(--shadow-accent)]">
-            <SortlyMark />
+      <aside className="ui-sidebar app-sidebar fixed inset-y-0 left-0 z-40 flex flex-col border-r px-3 py-4">
+        <div className="mb-7 flex items-center gap-3 px-2">
+          <div className="app-brand-mark shrink-0">
+            <img src={sortlyMark} alt="" width="40" height="40" />
           </div>
           <div className="min-w-0">
             <div className="font-display text-[17px] font-semibold leading-none tracking-[-0.02em]">sortly</div>
@@ -422,7 +505,7 @@ export default function App() {
       </aside>
 
       <main className="app-main min-h-screen">
-        <header className="ui-header sticky top-0 z-30 flex h-16 items-center justify-between border-b px-7">
+        <header className="ui-header app-topbar sticky top-0 z-30 flex items-center justify-between border-b">
           <div className="flex items-center gap-2 text-xs text-ink-muted">
             Workspace <ChevronRight size={13} /> <span className="font-medium text-ink">{VIEW_META[activeView].label}</span>
           </div>
@@ -435,13 +518,13 @@ export default function App() {
         <div className="app-content">
           {activeView === "organize" && (
           <motion.div key="organize" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-            <div className="ui-eyebrow mb-3 flex items-center gap-2 text-accent-text"><Sparkles size={14} /> Your AI workspace</div>
-            <h1 className="font-display text-[2rem] font-semibold leading-[1.15] tracking-[-0.035em]">A place for everything.</h1>
-            <p className="mt-3 text-sm text-ink-muted">Pick a folder. Preview the plan. Let AI do the sorting.</p>
+            <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Sparkles size={13} className="text-accent-text" /> Your AI workspace</div>
+            <h1 className="page-title">A place for everything.</h1>
+            <p className="page-intro">Pick a folder. Preview the plan. Let AI do the sorting.</p>
 
-            <section className="ui-panel mt-8 p-6">
+            <section className="ui-panel organize-source-panel mt-8">
               <label className="ui-eyebrow mb-3 block text-ink-muted">Source folder</label>
-              <div className="ui-input-shell flex items-center gap-3 p-2 pl-3">
+              <div className="ui-input-shell source-folder-control flex items-center gap-3">
                 <HardDrive size={17} className="shrink-0 text-ink-muted" />
                 <input
                   value={source}
@@ -449,34 +532,22 @@ export default function App() {
                   className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
                   placeholder={String.raw`C:\Users\you\Documents`}
                 />
-                <Button variant="secondary" size="sm" onClick={chooseFolder} disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
+                <Button variant="secondary" size="sm" className="source-browse-button" onClick={chooseFolder} disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
               </div>
-              <div className="mt-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-3 lg:flex-1">
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-muted">
-                    <input type="checkbox" checked={recursive} onChange={(event) => { setRecursive(event.target.checked); resetPreview(); }} className="size-3.5 accent-accent" />
-                    Include subfolders
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-muted">
-                    <input type="checkbox" checked={rename} onChange={(event) => { setRename(event.target.checked); resetPreview(); }} className="size-3.5 accent-accent" />
-                    Suggest cleaner file names
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-muted">
-                    <input type="checkbox" checked={reorganize} onChange={(event) => { setReorganize(event.target.checked); resetPreview(); }} className="size-3.5 accent-accent" />
-                    Reorganize already sorted files
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-muted">
-                    <input type="checkbox" checked={allowSensitiveCloud} onChange={(event) => { setAllowSensitiveCloud(event.target.checked); resetPreview(); }} className="size-3.5 accent-warning" />
-                    Allow redacted cloud analysis for sensitive files
-                  </label>
+              <fieldset className="organize-options">
+                <legend className="ui-eyebrow text-ink-muted">Organize options</legend>
+                <div className="organize-options-grid">
+                  <OptionSwitch label="Include subfolders" checked={recursive} onChange={(checked) => { setRecursive(checked); resetPreview(); }} />
+                  <OptionSwitch label="Suggest cleaner file names" checked={rename} onChange={(checked) => { setRename(checked); resetPreview(); }} />
+                  <OptionSwitch label="Reorganize already sorted files" checked={reorganize} onChange={(checked) => { setReorganize(checked); resetPreview(); }} />
+                  <OptionSwitch label="Allow redacted cloud analysis for sensitive files" checked={allowSensitiveCloud} tone="warning" onChange={(checked) => { setAllowSensitiveCloud(checked); resetPreview(); }} />
                 </div>
-                <div className="flex items-center gap-4 lg:ml-auto">
-                  <span className="hidden items-center gap-2 text-xs text-ink-muted sm:flex"><ShieldCheck size={15} className="text-success" /> Preview only · No files moved</span>
-                  <Button onClick={createPreview} disabled={busy !== null || !source.trim() || !apiReady}>
-                    {busy === "preview" ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                    Analyze folder <ArrowRight size={15} />
-                  </Button>
-                </div>
+              </fieldset>
+              <div className="organize-action-bar">
+                <Button className="organize-analyze-button h-9 px-3.5" onClick={createPreview} disabled={busy !== null || !source.trim() || !apiReady}>
+                  {busy === "preview" ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                  Analyze folder <ArrowRight size={15} />
+                </Button>
               </div>
             </section>
 
@@ -529,7 +600,7 @@ export default function App() {
               {preview?.plan_warnings.map((warning) => <Notice key={warning} tone="error" text={warning} />)}
             </AnimatePresence>
 
-            {preview && <PreviewSummary preview={preview} selectedCount={selectedCount} groupCount={groups.length} />}
+            {preview && <PreviewSummary preview={preview} stats={reviewStats} groupCount={groups.length} />}
 
             <AnimatePresence>
               {completion && (
@@ -550,44 +621,154 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={reducedMotion ? undefined : { opacity: 0, y: -4 }}
                   transition={{ duration: reducedMotion ? 0 : 0.24, ease: "easeOut" }}
-                  className="ui-panel mt-6 overflow-hidden"
+                  className="ui-panel review-shell mt-6 overflow-hidden"
+                  aria-labelledby="review-heading"
                 >
-                  <div className="flex items-center justify-between border-b border-line p-5">
-                    <div><h2 className="font-display font-semibold tracking-tight">Proposed organization</h2><p className="mt-1 text-xs text-ink-muted">Review the evidence, then accept, edit, or reject each file. Group switches apply to every file in that target.</p></div>
-                    <span className="rounded-full border border-line bg-surface-secondary px-2.5 py-1 font-mono text-[11px] text-ink-soft">{selectedCount} / {preview.files.length} selected{invalidEditCount > 0 ? ` · ${invalidEditCount} need attention` : ""}</span>
+                  <div className="review-header">
+                    <div className="min-w-0">
+                      <div className="ui-eyebrow flex items-center gap-2 text-ink-muted"><Sparkles size={13} className="text-accent-text" /> Ready for review</div>
+                      <h2 id="review-heading" className="mt-2 font-display text-xl font-semibold tracking-tight">Review files by destination</h2>
+                      <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">
+                        {reviewBatchMode === "large"
+                          ? `${preview.files.length.toLocaleString()} files are grouped into ${groups.length.toLocaleString()} destinations. Review exceptions first, then expand only what you need.`
+                          : reviewBatchMode === "medium"
+                            ? `${preview.files.length.toLocaleString()} files are grouped into ${groups.length.toLocaleString()} destinations. Use search or open a group to review it.`
+                            : `Review destinations and names below. Group controls include or exclude every file in that destination.`}
+                      </p>
+                    </div>
+                    <span className="review-selected-count">
+                      <strong>{selectedCount}</strong> of {preview.files.length} included
+                    </span>
                   </div>
-                  <div className="divide-y divide-line">
-                    {groups.map(([target, files], groupIndex) => {
-                      const selected = files.every((file) => fileEdits[file.id]?.accepted);
-                      return <motion.div
-                        key={target}
-                        className="p-5"
-                        initial={reducedMotion ? false : { opacity: 0, y: 5 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: reducedMotion ? 0 : 0.2, delay: reducedMotion ? 0 : Math.min(groupIndex * 0.035, 0.18), ease: "easeOut" }}
-                      >
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="flex min-w-0 items-center gap-3"><Folder size={17} className="shrink-0 text-accent-text" /><div className="min-w-0"><p className="truncate text-sm font-medium">{target}</p><p className="mt-0.5 text-xs text-ink-muted">{files.length} {files.length === 1 ? "file" : "files"}</p></div></div>
-                          <button role="switch" aria-checked={selected} onClick={() => toggleTarget(target)} className="ui-switch" data-checked={selected}>
-                            <span className="ui-switch-thumb" />
-                            <span className="sr-only">Toggle {target}</span>
+
+                  {(reviewStats.attention > 0 || reviewStats.security > 0) && (
+                    <div className="review-overview">
+                      {reviewStats.security > 0 && (
+                        <button type="button" className="review-overview-item" data-tone="security" onClick={() => setReviewFilter("security")}>
+                          <AlertTriangle size={15} />
+                          <span><strong>{reviewStats.security}</strong> {reviewStats.security === 1 ? "file has" : "files have"} potentially sensitive content</span>
+                        </button>
+                      )}
+                      {reviewStats.attention > 0 && (
+                        <button type="button" className="review-overview-item" data-tone="attention" onClick={() => setReviewFilter("attention")}>
+                          <AlertTriangle size={15} />
+                          <span><strong>{reviewStats.attention}</strong> {reviewStats.attention === 1 ? "file needs" : "files need"} a closer look</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {showReviewTools && (
+                    <div className="review-toolbar">
+                      <label className="review-search">
+                        <Search size={15} aria-hidden="true" />
+                        <span className="sr-only">Search files and destinations</span>
+                        <input
+                          value={reviewQuery}
+                          onChange={(event) => setReviewQuery(event.target.value)}
+                          placeholder="Search files or destinations"
+                        />
+                      </label>
+                      <div className="review-filters" role="group" aria-label="Filter files">
+                        {([
+                          ["all", "All", preview.files.length],
+                          ["attention", "Needs review", reviewStats.attention],
+                          ["security", "Security", reviewStats.security],
+                        ] as const).map(([value, label, count]) => (
+                          <button
+                            key={value}
+                            type="button"
+                            data-active={reviewFilter === value}
+                            onClick={() => setReviewFilter(value)}
+                            disabled={value !== "all" && count === 0}
+                          >
+                            {label} <span>{count}</span>
                           </button>
-                        </div>
-                        <div className="mt-4 space-y-3 border-l border-line pl-4">
-                          {files.map((file) => (
-                            <FilePreviewRow
-                              key={file.id}
-                              file={file}
-                              edit={fileEdits[file.id]}
-                              onChange={(edit) => setFileEdits((current) => ({ ...current, [file.id]: edit }))}
-                            />
-                          ))}
-                        </div>
-                      </motion.div>;
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {filteredReviewGroups.length === 0 && (
+                    <div className="review-empty">
+                      <Search size={20} />
+                      <div><strong>No matching files</strong><p>Try another search or clear the current filter.</p></div>
+                      <Button variant="secondary" size="sm" onClick={() => { setReviewFilter("all"); setReviewQuery(""); }}>Clear filters</Button>
+                    </div>
+                  )}
+
+                  <div className="review-groups">
+                    {visibleReviewGroups.map(([target, files]) => {
+                      const allFiles = groups.find(([name]) => name === target)?.[1] ?? files;
+                      const selected = allFiles.every((file) => fileEdits[file.id]?.accepted ?? file.selected);
+                      const groupSummary = summarizeGroup(allFiles, fileEdits);
+                      const expanded = Boolean(expandedGroups[target]);
+                      const panelId = `review-group-${encodeURIComponent(target)}`;
+                      return (
+                        <section key={target} className="review-group" data-open={expanded}>
+                          <div className="review-group-header">
+                            <button
+                              type="button"
+                              className="review-group-toggle"
+                              aria-expanded={expanded}
+                              aria-controls={panelId}
+                              onClick={() => toggleReviewGroup(target)}
+                            >
+                              <ChevronDown size={15} className="review-group-chevron" />
+                              <Folder size={16} className="shrink-0 text-accent-text" />
+                              <span className="min-w-0 text-left">
+                                <strong title={target}>{target.split("/").join(" › ")}</strong>
+                                <span>
+                                  {files.length === allFiles.length
+                                    ? `${files.length} ${files.length === 1 ? "file" : "files"}`
+                                    : `${files.length} shown · ${allFiles.length} total`}
+                                </span>
+                              </span>
+                            </button>
+                            <div className="review-group-meta">
+                              {groupSummary.security > 0 && <span className="review-group-flag" data-tone="security">{groupSummary.security} sensitive</span>}
+                              {groupSummary.attention > 0 && <span className="review-group-flag" data-tone="attention">{groupSummary.attention} to check</span>}
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={selected}
+                                aria-label={`Include all files in ${target}`}
+                                onClick={() => toggleTarget(target)}
+                                className="ui-switch"
+                                data-checked={selected}
+                              >
+                                <span className="ui-switch-thumb" />
+                              </button>
+                            </div>
+                          </div>
+                          {expanded && (
+                            <div id={panelId} className="review-group-files">
+                              {files.map((file) => (
+                                <FilePreviewRow
+                                  key={file.id}
+                                  file={file}
+                                  edit={fileEdits[file.id]}
+                                  onChange={updateFileEdit}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </section>
+                      );
                     })}
                   </div>
-                  <div className="flex items-center justify-between border-t border-line p-5">
-                    <div className="flex items-center gap-2 text-xs text-ink-muted"><LockKeyhole size={14} /> The shown plan is what will be submitted. The backend remains authoritative for path normalization and collisions.</div>
+
+                  {hiddenGroupCount > 0 && (
+                    <div className="review-load-more">
+                      <span>{hiddenGroupCount.toLocaleString()} more destinations</span>
+                      <Button variant="secondary" size="sm" onClick={() => setVisibleGroupLimit((current) => current + (reviewBatchMode === "large" ? 40 : 80))}>
+                        Show more destinations
+                      </Button>
+                    </div>
+                  )}
+
+                  <div className="review-footer">
+                    <div className="flex items-center gap-2 text-xs text-ink-muted"><LockKeyhole size={14} /> Nothing changes until you review and confirm.</div>
                     <Button onClick={() => setConfirmOpen(true)} disabled={busy !== null || selectedCount === 0 || invalidEditCount > 0}>{busy === "apply" && <LoaderCircle size={15} className="animate-spin" />} {busy === "apply" ? "Applying…" : invalidEditCount > 0 ? "Fix required fields" : "Review & organize"}</Button>
                   </div>
                   {invalidEditCount > 0 && (
@@ -605,11 +786,11 @@ export default function App() {
 
           {activeView === "history" && (
             <motion.div key="history" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-              <div className="ui-eyebrow mb-3 flex items-center gap-2 text-accent-text"><HistoryIcon size={14} /> Activity log</div>
-              <h1 className="font-display text-[2rem] font-semibold leading-[1.15] tracking-[-0.035em]">Every move, reversible.</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-muted">Review organization runs across your workspace. Each run keeps its original undo path.</p>
+              <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><HistoryIcon size={13} className="text-accent-text" /> Activity log</div>
+              <h1 className="page-title">Every move, reversible.</h1>
+              <p className="page-intro">Review organization runs across your workspace. Each run keeps its original undo path.</p>
 
-              <section className="ui-panel mt-8 p-6">
+              <section className="ui-panel page-panel p-6">
                 {apiReady
                   ? <HistoryPanel apiBase={apiBase} onChanged={() => { setUndoAvailable(false); setCompletion(null); }} />
                   : <ServiceNotice runtime={apiRuntime} subject="History" />}
@@ -619,11 +800,11 @@ export default function App() {
 
           {activeView === "providers" && (
             <motion.div key="providers" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-              <div className="ui-eyebrow mb-3 flex items-center gap-2 text-accent-text"><Plug size={14} /> Model routing</div>
-              <h1 className="font-display text-[2rem] font-semibold leading-[1.15] tracking-[-0.035em]">Choose what powers analysis.</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-muted">Configure a primary model and explicit fallbacks. Credentials remain encrypted by the local backend.</p>
+              <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Plug size={13} className="text-accent-text" /> Model routing</div>
+              <h1 className="page-title">Choose what powers analysis.</h1>
+              <p className="page-intro">Configure a primary model and explicit fallbacks. Credentials remain encrypted by the local backend.</p>
 
-              <section className="ui-panel mt-8 p-6">
+              <section className="ui-panel page-panel p-6">
                 {apiReady
                   ? <ProviderStudio open onOpenChange={() => undefined} apiBase={apiBase} presentation="page" />
                   : <ServiceNotice runtime={apiRuntime} subject="Provider configuration" />}
@@ -663,16 +844,6 @@ export default function App() {
   );
 }
 
-function SortlyMark() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" width="21" height="21" fill="none">
-      <path d="M3.75 7.25c0-1.1.9-2 2-2h4.1l1.8 2h6.6c1.1 0 2 .9 2 2v7.5c0 1.1-.9 2-2 2H5.75c-1.1 0-2-.9-2-2v-9.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M8 13h6.5M8 16h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <path d="M17.5 9.25v2h-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function ServiceNotice({ runtime, subject }: { runtime: ApiRuntime; subject: string }) {
   const failed = runtime.state === "error";
   return (
@@ -687,6 +858,35 @@ function ServiceNotice({ runtime, subject }: { runtime: ApiRuntime; subject: str
         </p>
       </div>
     </div>
+  );
+}
+
+function OptionSwitch({
+  label,
+  checked,
+  tone = "accent",
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  tone?: "accent" | "warning";
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="organize-option" data-tone={tone}>
+      <span>{label}</span>
+      <input
+        type="checkbox"
+        role="switch"
+        aria-checked={checked}
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="sr-only"
+      />
+      <span className="ui-switch" data-checked={checked} aria-hidden="true">
+        <span className="ui-switch-thumb" />
+      </span>
+    </label>
   );
 }
 
@@ -707,11 +907,11 @@ function SettingsPanel({
 
   return (
     <>
-      <div className="ui-eyebrow mb-3 flex items-center gap-2 text-accent-text"><Settings2 size={14} /> Preferences</div>
-      <h1 className="font-display text-[2rem] font-semibold leading-[1.15] tracking-[-0.035em]">Make the workspace yours.</h1>
-      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-muted">Only preferences implemented by the current frontend appear here.</p>
+      <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Settings2 size={13} className="text-accent-text" /> Preferences</div>
+      <h1 className="page-title">Make the workspace yours.</h1>
+      <p className="page-intro">Only preferences implemented by the current frontend appear here.</p>
 
-      <section className="ui-panel mt-8 overflow-hidden" aria-labelledby="appearance-heading">
+      <section className="ui-panel page-panel overflow-hidden" aria-labelledby="appearance-heading">
         <div className="border-b border-line p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-ink"><ActiveThemeIcon size={17} className="text-accent-text" /><h2 id="appearance-heading" className="font-display text-lg font-semibold tracking-tight">Appearance</h2></div>
@@ -757,7 +957,7 @@ function SettingsPanel({
         </p>
       </section>
 
-      <section className="ui-panel mt-6 p-6">
+      <section className="ui-panel mt-4 p-6">
         <div className="flex items-start gap-3">
           <ShieldCheck size={18} className="mt-0.5 shrink-0 text-success" />
           <div>
@@ -772,34 +972,46 @@ function SettingsPanel({
   );
 }
 
-function PreviewSummary({ preview, selectedCount, groupCount }: {
+function PreviewSummary({ preview, stats, groupCount }: {
   preview: Preview;
-  selectedCount: number;
+  stats: ReviewStats;
   groupCount: number;
 }) {
   const reducedMotion = useReducedMotion();
   const skippedReasons = Object.entries(preview.scan_summary.reasons ?? {}).filter(([, count]) => count > 0);
+  const title = stats.security > 0
+    ? "Review sensitive files before organizing."
+    : stats.attention > 0
+      ? "Most files are ready. A few need a closer look."
+      : "Your files are ready to review.";
   return (
     <motion.section
       initial={reducedMotion ? false : { opacity: 0, y: 5 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: reducedMotion ? 0 : 0.22, ease: "easeOut" }}
-      className="ui-panel mt-4 overflow-hidden"
+      className="review-summary-strip mt-4 overflow-hidden"
       aria-label="Scan and preview summary"
     >
-      <div className="preview-summary">
-        <div className="summary-metric"><span className="summary-label">Files seen</span><strong>{preview.scan_summary.files_seen}</strong></div>
-        <div className="summary-metric"><span className="summary-label">Plan items</span><strong>{preview.files.length}</strong></div>
-        <div className="summary-metric"><span className="summary-label">Destination groups</span><strong>{groupCount}</strong></div>
-        <div className="summary-metric"><span className="summary-label">Selected</span><strong>{selectedCount}</strong></div>
-        <div className="summary-metric"><span className="summary-label">Analysis</span><strong>{preview.analysis_seconds}s</strong></div>
-        {preview.scan_summary.skipped > 0 && (
-          <div className="summary-metric" data-tone="warning"><span className="summary-label">Skipped</span><strong>{preview.scan_summary.skipped}</strong></div>
-        )}
-        {preview.already_organized > 0 && (
-          <div className="summary-metric"><span className="summary-label">Already organized</span><strong>{preview.already_organized}</strong></div>
-        )}
+      <div className="review-summary-copy">
+        <div>
+          <div className="ui-eyebrow text-ink-muted">Review overview</div>
+          <h2>{title}</h2>
+          <p>{stats.total.toLocaleString()} files are ready to inspect. Nothing moves until you explicitly confirm.</p>
+        </div>
+        <span>{stats.selected.toLocaleString()} included</span>
       </div>
+      <div className="review-summary-metrics">
+        <div><span>Ready</span><strong>{stats.ready.toLocaleString()}</strong></div>
+        <div data-tone="attention"><span>Needs a look</span><strong>{stats.attention.toLocaleString()}</strong></div>
+        <div data-tone="security"><span>Security</span><strong>{stats.security.toLocaleString()}</strong></div>
+        <div><span>Excluded</span><strong>{stats.excluded.toLocaleString()}</strong></div>
+        <div><span>Destinations</span><strong>{groupCount.toLocaleString()}</strong></div>
+      </div>
+      <p className="review-scan-note">
+        Analyzed {preview.files.length.toLocaleString()} files in {preview.analysis_seconds}s
+        {preview.scan_summary.skipped > 0 ? ` · ${preview.scan_summary.skipped.toLocaleString()} skipped by safety checks` : ""}
+        {preview.already_organized > 0 ? ` · ${preview.already_organized.toLocaleString()} already organized` : ""}.
+      </p>
       {(skippedReasons.length > 0 || preview.scan_summary.truncated) && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-warning/20 bg-warning-soft px-5 py-3 text-xs text-warning">
           {preview.scan_summary.truncated && <span>File-count safety limit reached.</span>}
@@ -883,10 +1095,10 @@ function CompletionSummary({
   );
 }
 
-function FilePreviewRow({ file, edit, onChange }: {
+const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
   file: PlanItem;
   edit: FileEdit | undefined;
-  onChange: (edit: FileEdit) => void;
+  onChange: (fileId: string, edit: FileEdit) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
@@ -900,90 +1112,73 @@ function FilePreviewRow({ file, edit, onChange }: {
   const nameChanged = current.destination_name !== file.name;
   const destinationInvalid = current.accepted && !current.target_path.trim();
   const filenameInvalid = current.accepted && !current.destination_name.trim();
-  const confidenceClass = file.confidence === "high"
-    ? "border-success/30 bg-success-soft text-success"
-    : file.confidence === "medium"
-      ? "border-warning/30 bg-warning-soft text-warning"
-      : "border-line-strong bg-surface-secondary text-ink-soft";
+  const status = getFileReviewStatus(file, current);
+  const warningSummary = summarizeFileWarning(file, current);
+  const warnings = [...new Set(file.warnings.filter(Boolean))];
+  const statusLabel: Record<ReviewFileStatus, string> = {
+    ready: "Ready",
+    attention: "Needs a look",
+    security: "Sensitive",
+    excluded: "Not included",
+  };
+  const change = (next: FileEdit) => onChange(file.id, next);
   return (
-    <article data-file-id={file.id} className="plan-file" data-excluded={!current.accepted}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <label className="flex cursor-pointer items-start gap-2 text-sm">
+    <article data-file-id={file.id} className="plan-file review-file" data-excluded={!current.accepted} data-status={status}>
+      <div className="review-file-head">
+        <label className="review-include">
           <input
             type="checkbox"
             checked={current.accepted}
-            onChange={(event) => onChange({ ...current, accepted: event.target.checked })}
-            className="mt-0.5 accent-accent"
+            onChange={(event) => change({ ...current, accepted: event.target.checked })}
+            className="accent-accent"
           />
-          <span>
-            <span className="block text-xs font-medium text-ink">{current.accepted ? "Include this file" : "File excluded"}</span>
-            <span className="mt-0.5 block text-[11px] text-ink-muted">{file.evidence_sufficient ? "Evidence supports this plan" : "Limited evidence"}</span>
+          <span className="min-w-0">
+            <strong title={file.name}>{file.name}</strong>
+            <span>{current.accepted ? "Included in this plan" : "Will stay in the source folder"}</span>
           </span>
         </label>
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] ${confidenceClass}`}>{file.confidence} confidence</span>
+        {status !== "ready" && (
+          <span className="review-status-chip" data-tone={status}>
+            <AlertTriangle size={12} />
+            {statusLabel[status]}
+          </span>
+        )}
       </div>
 
-      <div className="filename-compare" aria-label={nameChanged ? "Filename will change" : "Name unchanged"}>
-        <div className="name-track">
-          <span className="ui-eyebrow text-ink-muted">Original filename</span>
-          <code className="filename-value mt-1 block text-ink-soft" title={file.name}>{file.name}</code>
+      <div className="review-file-plan">
+        <div>
+          <span>Destination</span>
+          <strong title={current.target_path}>{current.target_path.split("/").join(" › ")}</strong>
         </div>
-        <span className="filename-arrow" aria-hidden="true"><ArrowRight size={15} /></span>
-        <div className="name-track">
-          <span className="ui-eyebrow text-ink-muted">{nameChanged ? "Proposed filename" : "Filename change"}</span>
-          {nameChanged
-            ? <code className="filename-value mt-1 block text-accent-text" title={current.destination_name}>{current.destination_name}</code>
-            : <span className="name-unchanged mt-1.5"><Check size={13} /> Name unchanged</span>}
+        <div>
+          <span>Filename</span>
+          <code title={current.destination_name}>{current.destination_name}</code>
         </div>
       </div>
 
-      {nameChanged && file.rename_reason && <p className="mt-2 text-xs leading-relaxed text-accent-text">{file.rename_reason}</p>}
+      {nameChanged && (
+        <p className="review-rename-summary">
+          <span>{file.name}</span><ArrowRight size={13} aria-hidden="true" /><span>{current.destination_name}</span>
+        </p>
+      )}
 
-      <div className="mt-3 grid gap-2 md:grid-cols-2">
-        <label className="text-[11px] text-ink-muted">Destination folder
-          <input
-            value={current.target_path}
-            onChange={(event) => onChange({ ...current, target_path: event.target.value })}
-            disabled={!current.accepted}
-            className="ui-field mt-1 w-full px-2.5 py-1.5 text-xs"
-            data-invalid={destinationInvalid}
-            aria-invalid={destinationInvalid}
-            aria-describedby={destinationInvalid ? `${validationId}-destination` : undefined}
-          />
-          {destinationInvalid && <span id={`${validationId}-destination`} className="field-error">Destination cannot be empty.</span>}
-        </label>
-        <label className="text-[11px] text-ink-muted">Proposed filename
-          <input
-            value={current.destination_name}
-            onChange={(event) => onChange({ ...current, destination_name: event.target.value })}
-            disabled={!current.accepted}
-            className="ui-field mt-1 w-full px-2.5 py-1.5 text-xs"
-            data-invalid={filenameInvalid}
-            aria-invalid={filenameInvalid}
-            aria-describedby={filenameInvalid ? `${validationId}-filename` : undefined}
-          />
-          {filenameInvalid && <span id={`${validationId}-filename`} className="field-error">Filename cannot be empty.</span>}
-        </label>
-      </div>
-      <p className="edit-guidance">Windows-invalid filename characters may be normalized by the backend. Collisions are resolved locally without overwriting files.</p>
-
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
-        {file.sensitive && <span className="font-medium text-warning">Possible sensitive content · cloud disabled by default</span>}
-        <span>{file.detected_type !== "unknown" ? `Detected: ${file.detected_type}` : "Type signature unavailable"}</span>
-        {file.filename_conflict !== "none" && <span className="text-warning">Filename conflict: {file.filename_conflict.replace("_", " ")}</span>}
-      </div>
-      {file.warnings.map((warning) => <p key={warning} className="mt-1 text-xs text-warning">{warning}</p>)}
+      {warningSummary && status !== "ready" && (
+        <p className="review-warning-summary" data-tone={status}>
+          <AlertTriangle size={14} />
+          <span>{warningSummary}</span>
+        </p>
+      )}
 
       <button
         type="button"
-        className="file-details-trigger mt-3"
+        className="file-details-trigger"
         aria-expanded={detailsOpen}
         aria-controls={detailsId}
         onClick={() => setDetailsOpen((open) => !open)}
       >
         <ChevronDown size={14} className="file-details-chevron" data-open={detailsOpen} />
-        <span>{detailsOpen ? "Hide evidence and reasoning" : "View evidence and reasoning"}</span>
-        {file.evidence_sources.length > 0 && <span className="file-details-count">{file.evidence_sources.length} {file.evidence_sources.length === 1 ? "source" : "sources"}</span>}
+        <span>{detailsOpen ? "Hide details" : "Edit or view details"}</span>
+        {warnings.length > 0 && <span className="file-details-count">{warnings.length}</span>}
       </button>
 
       <AnimatePresence initial={false}>
@@ -997,12 +1192,55 @@ function FilePreviewRow({ file, edit, onChange }: {
             className="overflow-hidden"
           >
             <div className="file-details-panel">
-              <p className="text-xs leading-relaxed text-ink-soft">{file.reasoning}</p>
-              {file.evidence_excerpt && <p className="mt-2 text-xs italic leading-relaxed text-ink-faint">“{file.evidence_excerpt}”</p>}
-              <div className="mt-3 grid gap-2 text-[11px] text-ink-muted">
+              <div className="review-edit-grid">
+                <label>Destination folder
+                  <input
+                    value={current.target_path}
+                    onChange={(event) => change({ ...current, target_path: event.target.value })}
+                    disabled={!current.accepted}
+                    className="ui-field"
+                    data-invalid={destinationInvalid}
+                    aria-invalid={destinationInvalid}
+                    aria-describedby={destinationInvalid ? `${validationId}-destination` : undefined}
+                  />
+                  {destinationInvalid && <span id={`${validationId}-destination`} className="field-error">Destination cannot be empty.</span>}
+                </label>
+                <label>Proposed filename
+                  <input
+                    value={current.destination_name}
+                    onChange={(event) => change({ ...current, destination_name: event.target.value })}
+                    disabled={!current.accepted}
+                    className="ui-field"
+                    data-invalid={filenameInvalid}
+                    aria-invalid={filenameInvalid}
+                    aria-describedby={filenameInvalid ? `${validationId}-filename` : undefined}
+                  />
+                  {filenameInvalid && <span id={`${validationId}-filename`} className="field-error">Filename cannot be empty.</span>}
+                </label>
+              </div>
+              <p className="edit-guidance">Unsafe filename characters are normalized by the local service. Existing files are never overwritten.</p>
+
+              <div className="review-detail-section">
+                <h4>Why Sortly suggested this</h4>
+                <p>{file.reasoning}</p>
+                {file.rename_reason && nameChanged && <p>{file.rename_reason}</p>}
+                {file.evidence_excerpt && <blockquote>“{file.evidence_excerpt}”</blockquote>}
+              </div>
+
+              {warnings.length > 0 && (
+                <div className="review-detail-section">
+                  <h4>Warnings and diagnostics</h4>
+                  <ul>
+                    {warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <div className="review-detail-diagnostics">
                 <span className="break-all">Current location: {file.current_path}</span>
-                <span>Detected type: {file.detected_type}</span>
-                <span>Extraction: {file.extraction_status}</span>
+                <span>Detected type: {file.detected_type || "unknown"}</span>
+                <span>Extraction status: {file.extraction_status}</span>
+                <span>Classification confidence: {file.confidence}</span>
                 {file.evidence_sources.length > 0 && <span>Evidence sources: {file.evidence_sources.join(", ")}</span>}
               </div>
             </div>
@@ -1011,7 +1249,7 @@ function FilePreviewRow({ file, edit, onChange }: {
       </AnimatePresence>
     </article>
   );
-}
+});
 
 function Notice({ tone, text }: { tone: "success" | "error"; text: string }) {
   const success = tone === "success";

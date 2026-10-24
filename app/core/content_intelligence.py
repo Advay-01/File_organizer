@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from app.core import llm_http
-from app.core.content_cache import ContentIntelligenceCache, analysis_cache_key
+from app.core.content_cache import (
+    ContentIntelligenceCache,
+    analysis_cache_key,
+    refresh_evidence_identity,
+)
 from app.core.evidence import EvidenceBundle, content_fingerprint, extract_evidence
 from app.core.planner import Move, sanitize_target_path
 from app.core.privacy import redact_sensitive
@@ -25,6 +29,12 @@ GENERIC_NAME = re.compile(
     r"^(?:img|dsc|scan|image|file|document|doc|untitled|new|final|output|download)[\s_-]*\d*$",
     re.I,
 )
+EXTENSION_OVERRIDES = {
+    ".bmp", ".c", ".cpp", ".csv", ".docx", ".env", ".epub", ".gif", ".gz", ".html",
+    ".ipynb", ".jpg", ".js", ".json", ".md", ".pdf", ".pem", ".png", ".pptx",
+    ".py", ".rar", ".sh", ".sql", ".svg", ".tar", ".tiff", ".txt", ".webp",
+    ".xlsx", ".xml", ".zip",
+}
 
 SYSTEM_PROMPT = """You analyze files for a Windows file organizer.
 Use extracted content first, then reliable metadata, then filename/extension only as weak context.
@@ -41,7 +51,9 @@ Rules:
 - category must be a broad subject; subcategory should be reusable and concise.
 - high confidence requires substantial extracted content and a verified quote.
 - use insufficient and Misc/General when evidence is unreadable or too weak.
-- suggest a filename only when evidence clearly identifies the document. Preserve the extension.
+- suggest a filename only when evidence clearly identifies the document.
+- when extension_mismatch is true and detected_type is supported by the evidence, use the
+  detected_type extension. Otherwise preserve the original extension.
 - never use the old filename as proof of content.
 - cover every input id exactly once."""
 
@@ -135,8 +147,17 @@ def _generic_filename(name: str) -> bool:
     return bool(GENERIC_NAME.match(Path(name).stem))
 
 
-def sanitize_windows_filename(name: str, original: str) -> str:
-    extension = Path(original).suffix
+def sanitize_windows_filename(
+    name: str,
+    original: str,
+    target_extension: str | None = None,
+) -> str:
+    original_extension = Path(original).suffix
+    extension = (
+        target_extension
+        if target_extension and re.fullmatch(r"\.[A-Za-z0-9]{1,10}", target_extension)
+        else original_extension
+    )
     candidate = str(name or "").strip()
     if extension and candidate.lower().endswith(extension.lower()):
         candidate = candidate[: -len(extension)]
@@ -225,7 +246,9 @@ def _prompt_item(item_id: int, evidence: EvidenceBundle) -> dict:
         "parent_directory": redact_sensitive(evidence.parent_directory),
         "extension": evidence.extension,
         "detected_type": evidence.detected_type,
+        "detected_type_confidence": evidence.detected_type_confidence,
         "extension_mismatch": evidence.extension_mismatch,
+        "parser_status": evidence.parser_status,
         "evidence_status": evidence.extraction_status,
         "content": (
             evidence.redacted_content[:2200]
@@ -255,10 +278,11 @@ def _build_suggestion(
     fallback_warning = result.get("warning")
     if fallback_warning:
         warnings.append(str(fallback_warning))
-    conflict = str(result.get("filename_conflict", "none") or "none").lower()
-    if conflict not in {"none", "generic", "misleading", "extension_mismatch"}:
-        conflict = "none"
-    if evidence.extension_mismatch:
+    model_conflict = str(result.get("filename_conflict", "none") or "none").lower()
+    if model_conflict not in {"none", "generic", "misleading", "extension_mismatch"}:
+        model_conflict = "none"
+    conflict = model_conflict
+    if evidence.extension_mismatch and conflict == "none":
         conflict = "extension_mismatch"
     if not grounded and evidence.extraction_status != "unavailable":
         warnings.append("Model evidence quote was not found in extracted evidence.")
@@ -266,17 +290,37 @@ def _build_suggestion(
     if not grounded and evidence.extraction_status != "unavailable":
         reasoning = "The model rationale could not be verified against extracted evidence."
 
-    proposed = sanitize_windows_filename(
-        str(result.get("suggested_name", "") or ""),
-        file.filename,
-    )
+    raw_proposed = str(result.get("suggested_name", "") or "")
     name_quote = str(result.get("name_evidence", "") or "")
     name_grounded = _quote_is_grounded(name_quote, evidence)
+    extension_override = None
+    if (
+        allow_rename
+        and raw_proposed.strip()
+        and grounded
+        and name_grounded
+        and confidence in {"high", "medium"}
+        and conflict in {"misleading", "extension_mismatch"}
+        and evidence.extension_mismatch
+        and evidence.detected_type_confidence == "high"
+        and evidence.detected_type in EXTENSION_OVERRIDES
+    ):
+        extension_override = evidence.detected_type
+    proposed = sanitize_windows_filename(
+        raw_proposed,
+        file.filename,
+        target_extension=extension_override,
+    )
     rename_reason = ""
     suggested_name = file.filename
     if allow_rename and proposed != file.filename and name_grounded and confidence in {"high", "medium"}:
         suggested_name = proposed
         rename_reason = f"Grounded in evidence: {name_quote[:160]}"
+        if extension_override and extension_override.lower() != Path(file.filename).suffix.lower():
+            rename_reason += (
+                f" Detected {evidence.detected_type} content and corrected the extension "
+                f"from {Path(file.filename).suffix or '(none)'} to {extension_override}."
+            )
     elif allow_rename and proposed != file.filename:
         warnings.append("Suggested filename was rejected because its evidence phrase was not grounded.")
 
@@ -384,7 +428,10 @@ def plan_content_intelligence(
     try:
         for file in files:
             fingerprint = content_fingerprint(Path(file.path)) or ""
-            evidence = cache.get_evidence(fingerprint) if fingerprint else None
+            extension = Path(file.path).suffix.lower()
+            evidence = cache.get_evidence(fingerprint, extension) if fingerprint else None
+            if evidence is not None:
+                evidence = refresh_evidence_identity(evidence, file)
             if evidence is None:
                 evidence = extract_evidence(file, fingerprint=fingerprint)
                 if not evidence.sensitive:

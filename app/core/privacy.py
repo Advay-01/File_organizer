@@ -28,6 +28,11 @@ API_KEY_PATTERNS = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
 )
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?im)^(?P<prefix>[ \t]*(?:export[ \t]+)?"
+    r"[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*"
+    r"[ \t]*=[ \t]*)(?P<value>[^\r\n]*\S[^\r\n]*)$"
+)
 FINANCIAL_TERMS = (
     "invoice", "receipt", "amount due", "tax invoice", "bank account",
     "account number", "payment", "balance", "transaction", "salary slip",
@@ -88,6 +93,10 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
         findings.append(SensitiveFinding("likely_api_key", ("provider key pattern",)))
     if PRIVATE_KEY_PATTERN.search(text or ""):
         findings.append(SensitiveFinding("private_key", ("PEM private-key header",)))
+    if CREDENTIAL_ASSIGNMENT.search(text or ""):
+        findings.append(
+            SensitiveFinding("likely_credential_assignment", ("secret-like environment assignment",))
+        )
 
     matches = sum(1 for term in FINANCIAL_TERMS if term in lowered)
     if matches >= 2:
@@ -103,6 +112,10 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
 def redact_sensitive(text: str) -> str:
     """Mask likely identifiers and credentials; exact matches never enter diagnostics."""
     result = text or ""
+    result = CREDENTIAL_ASSIGNMENT.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED SECRET]",
+        result,
+    )
     result = PRIVATE_KEY_PATTERN.sub("[REDACTED PRIVATE KEY HEADER]", result)
     for pattern in API_KEY_PATTERNS:
         result = pattern.sub("[REDACTED API KEY]", result)

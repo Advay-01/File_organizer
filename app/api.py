@@ -285,9 +285,11 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
             part for part in (original.folder, original.subfolder) if part
         )
         category, subcategory = sanitize_target_path(target_path)
+        planned_extension = Path(original.dest).suffix
         destination_name = sanitize_windows_filename(
             edit.destination_name or Path(original.src).name,
             Path(original.src).name,
+            target_extension=planned_extension,
         )
         destination = _unique_destination(
             plan.source.joinpath(category, subcategory, destination_name),
