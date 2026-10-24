@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from app import api
+from app.core.content_intelligence import ContentSuggestion
 from app.core.planner import Move
 
 
@@ -38,6 +39,104 @@ class ApiTests(unittest.TestCase):
         self.assertTrue((self.root / "Physics" / "Notes" / "lecture.txt").exists())
         self.assertTrue(self.second.exists())
         self.assertTrue(api.plans["saved-plan"].applied)
+
+    def test_apply_resolves_root_prefixed_jpg_path_once(self):
+        root = self.root / "Sortly_TestFolder"
+        root.mkdir()
+        source = root / "DSC_0042.jpg"
+        source.write_bytes(b"image")
+        suggestion = ContentSuggestion(
+            id=0,
+            path=str(Path(root.name) / source.name),
+            current_name=source.name,
+            category="Photos",
+            subcategory="Travel",
+            confidence="medium",
+            reasoning="photo",
+            evidence_quote="",
+            name_evidence="",
+            evidence_excerpt="",
+            evidence_sources=[],
+            warnings=[],
+            filename_conflict="none",
+            suggested_name=source.name,
+            rename_reason="",
+            sufficient_for_change=True,
+            detected_type=".jpg",
+            extraction_status="sufficient",
+        )
+        api.plans["jpg-path"] = api.StoredPlan(root, api._content_moves([suggestion], root), [suggestion])
+
+        result = api.apply(api.ApplyRequest(
+            plan_id="jpg-path",
+            files=[api.ApplyFile(id="0", accepted=True)],
+        ))
+
+        self.assertEqual(result["moved"], 1)
+        self.assertTrue((root / "Photos" / "Travel" / source.name).exists())
+
+    def test_apply_resolves_nested_relative_epub_path(self):
+        root = self.root / "Sortly_TestFolder"
+        source = root / "Education" / "Astronomy" / "Astronomy_Planets_Stars_Galaxies.epub"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"book")
+        suggestion = ContentSuggestion(
+            id=0,
+            path="Education/Astronomy/Astronomy_Planets_Stars_Galaxies.epub",
+            current_name=source.name,
+            category="Books",
+            subcategory="Science",
+            confidence="medium",
+            reasoning="book",
+            evidence_quote="",
+            name_evidence="",
+            evidence_excerpt="",
+            evidence_sources=[],
+            warnings=[],
+            filename_conflict="none",
+            suggested_name=source.name,
+            rename_reason="",
+            sufficient_for_change=True,
+            detected_type=".epub",
+            extraction_status="sufficient",
+        )
+        api.plans["epub-path"] = api.StoredPlan(root, api._content_moves([suggestion], root), [suggestion])
+
+        result = api.apply(api.ApplyRequest(
+            plan_id="epub-path",
+            files=[api.ApplyFile(id="0", accepted=True)],
+        ))
+
+        self.assertEqual(result["moved"], 1)
+        self.assertTrue((root / "Books" / "Science" / source.name).exists())
+
+    def test_missing_source_aborts_before_any_file_is_moved(self):
+        first = self.root / "first.txt"
+        second = self.root / "second.txt"
+        first.write_text("first")
+        second.write_text("second")
+        api.plans["stale-plan"] = api.StoredPlan(
+            self.root,
+            [
+                Move(str(first), str(self.root / "Docs" / "first.txt"), "Docs", "first"),
+                Move(str(second), str(self.root / "Docs" / "second.txt"), "Docs", "second"),
+            ],
+        )
+        second.unlink()
+
+        with self.assertRaises(api.HTTPException) as caught:
+            api.apply(api.ApplyRequest(
+                plan_id="stale-plan",
+                files=[
+                    api.ApplyFile(id="0", accepted=True),
+                    api.ApplyFile(id="1", accepted=True),
+                ],
+            ))
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("source file is missing", str(caught.exception.detail))
+        self.assertTrue(first.exists())
+        self.assertFalse((self.root / "Docs" / "first.txt").exists())
 
 
 if __name__ == "__main__":

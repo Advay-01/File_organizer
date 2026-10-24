@@ -59,28 +59,47 @@ Default: Gemini first, local Ollama as fallback.
 The Windows desktop shell launches the bundled Python API on a dynamically selected
 loopback port and gives the React frontend the actual address after a health check.
 
+#### Clean Windows build prerequisites
+
+- Windows with PowerShell and Python 3.10 or newer available as `python.exe`.
+- Node.js and npm. The repository does not pin a Node.js version; use a current
+  supported LTS release.
+- Visual Studio Build Tools with the **Desktop development with C++** workload,
+  including the MSVC x64 tools. The build locates them with `vswhere.exe`.
+- Internet access for npm packages, Python packages, project-local Rust, and
+  NSIS tools on the first build.
+
+#### Build
+
+Run these commands from the repository root in PowerShell:
+
 ```powershell
 npm install
 cd frontend
 npm install
 cd ..
 npm run rust:setup
-npm run desktop:dev
 ```
-
-Build the optimized executable and NSIS installer:
 
 ```powershell
 npm run desktop:build
 ```
 
-These commands use the project-local `.cargo` and `.rustup` directories. The
-build first removes generated sidecar and binary-staging directories, rebuilds
-the sidecar from source with `.pyinstaller-venv`, stages a complete clean copy,
-then builds the Tauri frontend and installer. Tauri's NSIS tools remain under
-`src-tauri/target`. Provider credentials are never bundled. For a packaged
-build, place `sortly.env` in the Tauri application configuration directory or
-set `SORTLY_ENV_FILE` to an external environment file before launch.
+The build automatically creates the project-local `.pyinstaller-venv` if it is
+missing, installs `requirements-build.txt` (the application runtime
+dependencies from `requirements.txt` plus pinned PyInstaller), and runs
+PyInstaller with that environment's interpreter. It then removes only known
+generated outputs, rebuilds and stages the sidecar, prepares local NSIS tools,
+builds the frontend, and packages the Tauri application. Rust is kept in the
+project-local `.cargo` and `.rustup` directories.
+
+The generated NSIS installer is under
+`src-tauri\target\release\bundle\nsis\` (the filename includes the product
+version and architecture). The sidecar is bundled from
+`src-tauri\binaries\sortly-api\`. Provider credentials are never bundled. For
+a packaged build, place `sortly.env` in the Tauri application configuration
+directory or set `SORTLY_ENV_FILE` to an external environment file before
+launch.
 
 ### Provider Studio
 
@@ -175,4 +194,7 @@ Classic binary Office formats (`.doc`, `.ppt`, `.xls`) are still scanned and can
 - Every `--apply` is logged for `--undo`.
 
 ## Tests
-`python -m unittest discover -s tests -v` (no API key needed)
+`python -m unittest discover -s tests -v` (no API key needed). Install
+`requirements-dev.txt` instead of `requirements.txt` when running the test
+suite; it adds test-only dependencies without putting them in the packaged
+sidecar environment.
