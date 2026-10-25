@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import errno
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -16,6 +17,16 @@ from app.core.planner import Move
 from app.core.safety import UnsafePathError, move_file_no_overwrite, validate_move_paths
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_print(message: str) -> None:
+    """Write diagnostics without allowing the console encoding to abort Apply."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_message = message.encode(encoding, "replace").decode(encoding, "replace")
+        print(safe_message)
 
 
 class ExecutionResult(list[dict]):
@@ -96,7 +107,7 @@ def execute_plan(
         if not m.selected:
             src = Path(m.src)
             category = "/".join(part for part in (m.folder, m.subfolder) if part)
-            print(f"  {src.name}  ->  kept in place (unselected: {category})")
+            _safe_print(f"  {src.name}  ->  kept in place (unselected: {category})")
     if dry_run:
         result.state = "success"
         return result
@@ -110,7 +121,7 @@ def execute_plan(
     for m in selected:
         src, dest = Path(m.src), Path(m.dest)
         category = "/".join(part for part in (m.folder, m.subfolder) if part)
-        print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
+        _safe_print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
         try:
             validate_move_paths(src, dest, Path(output_root), approved_source)
         except UnsafePathError as error:

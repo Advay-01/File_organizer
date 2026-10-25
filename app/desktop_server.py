@@ -27,6 +27,18 @@ DEFAULT_PORT = 8765
 SHUTDOWN_TOKEN_ENV = "SORTLY_SHUTDOWN_TOKEN"
 
 
+def _configure_stdio() -> None:
+    """Keep diagnostic writes safe when Windows presents a legacy text encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def _loopback_host(value: str) -> str:
     host = value.strip()
     if host.casefold() == "localhost":
@@ -140,6 +152,7 @@ def _run_frozen_folder_picker(argv: Sequence[str]) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     # This must run before any frozen child process is created on Windows.
     multiprocessing.freeze_support()
+    _configure_stdio()
 
     arguments = list(sys.argv[1:] if argv is None else argv)
     if _run_frozen_folder_picker(arguments):
