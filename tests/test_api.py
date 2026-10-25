@@ -2,10 +2,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app import api
 from app.core.content_intelligence import ContentSuggestion
 from app.core.planner import Move
+from app.models.schemas import FileInfo
 
 
 class ApiTests(unittest.TestCase):
@@ -137,6 +140,35 @@ class ApiTests(unittest.TestCase):
         self.assertIn("source file is missing", str(caught.exception.detail))
         self.assertTrue(first.exists())
         self.assertFalse((self.root / "Docs" / "first.txt").exists())
+
+    def test_preview_parse_failure_is_a_readable_502(self):
+        from fastapi.testclient import TestClient
+
+        file_info = FileInfo(
+            path=str(self.first),
+            filename=self.first.name,
+            extension=".txt",
+            size_kb=1,
+            date_created="2026-01-01",
+            snippet="notes",
+        )
+        scan_summary = SimpleNamespace(files_seen=1, skipped=0, reasons={}, truncated=False)
+        client = TestClient(api.app)
+        with (
+            patch("app.api.scan_directory_with_report", return_value=([file_info], scan_summary)),
+            patch("app.api.provider_store.activate_runtime", return_value=[]),
+            patch(
+                "app.api.plan_content_intelligence",
+                side_effect=ValueError("Model returned unusable JSON reply."),
+            ),
+        ):
+            response = client.post(
+                "/api/preview",
+                json={"source": str(self.root), "models": ["anthropic/claude-haiku-5-5"]},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("unusable JSON reply", response.json()["detail"])
 
 
 if __name__ == "__main__":

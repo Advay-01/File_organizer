@@ -273,13 +273,25 @@ def _sensitive_fallback(evidence: EvidenceBundle) -> dict:
     }
 
 
-def _model_call(models: List[str], messages: List[dict]) -> str:
+def _model_call(
+    models: List[str],
+    messages: List[dict],
+    expected_ids: set[int] | None = None,
+) -> str:
+    """Try each model in order. A reply that cannot be parsed counts as a failure of that model
+    (so the next one is tried) instead of crashing the whole analysis later."""
     errors = []
     for model in models:
         try:
-            return llm_http.direct_call_sync(model, messages, timeout=120, extra_body={"max_tokens": 3000})
+            raw = llm_http.direct_call_sync(model, messages, timeout=120, extra_body={"max_tokens": 3000})
+            if expected_ids is not None:
+                _parse_response(raw, expected_ids)  # raises ValueError if unusable
+            return raw
         except Exception as error:
-            errors.append(f"{model}: {str(error)[:240]}")
+            if expected_ids is not None and isinstance(error, ValueError):
+                errors.append(f"{model}: unusable reply ({str(error)[:200]})")
+            else:
+                errors.append(f"{model}: {str(error)[:240]}")
     raise RuntimeError("All content-intelligence models failed:\n  " + "\n  ".join(errors))
 
 
@@ -563,8 +575,13 @@ def plan_content_intelligence(
                     ),
                 },
             ]
-            raw = completion_fn(messages) if completion_fn else _model_call(models, messages)
-            parsed = _parse_response(raw, {index for index in range(len(batch))})
+            expected_ids = {index for index in range(len(batch))}
+            raw = (
+                completion_fn(messages)
+                if completion_fn
+                else _model_call(models, messages, expected_ids)
+            )
+            parsed = _parse_response(raw, expected_ids)
             for index, (file, evidence, _key) in enumerate(batch):
                 result = dict(parsed.get(index) or _fallback_suggestion(file, evidence))
                 suggestion = _build_suggestion(

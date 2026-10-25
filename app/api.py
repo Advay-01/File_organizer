@@ -484,8 +484,9 @@ def preview(request: PreviewRequest) -> PreviewResponse:
             plan_warnings = list(sanity.warnings)
             requires_confirmation = sanity.requires_confirmation
             analysis_stats = dict(result.stats)
-        except RuntimeError as error:
-            raise HTTPException(502, str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            # Parsing and validation failures from model replies are provider-facing errors.
+            raise HTTPException(502, str(error)[:600]) from error
     else:
         suggestions = []
         moves = []

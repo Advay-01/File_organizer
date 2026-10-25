@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5 - 2026-10-25
+
+### Fixed
+
+- A model reply that is prose, malformed JSON, the wrong shape, truncated, or empty is now treated as a failed model instead of aborting the preview.
+- Content analysis now falls back to the next configured model after an unusable reply.
+- When every model produces an unusable reply, the error identifies each model and the parsing problem.
+- Preview parsing failures now return a readable HTTP 502 message instead of the generic unexpected-error banner.
+- Added regressions for planner fallback, all-models-failed reporting, and the preview API error response.
+
 ## 0.1.4 - 2026-10-25
 
 ### Fixed
