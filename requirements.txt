@@ -2,6 +2,7 @@ litellm
 pydantic>=2
 python-dotenv
 pypdf
+cryptography>=3.1
 python-docx
 python-pptx
 openpyxl

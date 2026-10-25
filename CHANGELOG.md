@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6 - 2026-10-25
+
+### Fixed
+
+- Bundled the `cryptography` runtime required to read AES-encrypted PDFs.
+- Included pypdf's cryptography providers in the packaged sidecar.
+- Encrypted or otherwise undecryptable PDFs now fall back to bounded metadata/text handling instead of aborting the entire preview.
+- Added regressions for AES-256 PDF extraction and missing PDF cryptography providers.
+
 ## 0.1.5 - 2026-10-25
 
 ### Fixed

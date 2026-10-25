@@ -319,6 +319,35 @@ class ParserFallbackTests(unittest.TestCase):
                 self.assertEqual(extraction.text, "")
                 self.assertEqual(extraction.parser_status, "unavailable")
 
+    def test_missing_pdf_crypto_provider_uses_fallback_instead_of_aborting(self):
+        source = self.root / "protected.pdf"
+        source.write_bytes(b"%PDF-1.7\nencrypted fixture\n%%EOF")
+        from pypdf.errors import DependencyError
+
+        with patch(
+            "app.core.extractor._read_pdf",
+            side_effect=DependencyError("cryptography>=3.1 is required for AES algorithm"),
+        ):
+            extraction = extract_content(str(source), max_chars=200)
+
+        self.assertIn(extraction.parser_status, {"fallback", "unavailable"})
+        self.assertIn("PDF", extraction.warning)
+
+    def test_aes_encrypted_pdf_does_not_abort_extraction(self):
+        source = self.root / "aes-protected.pdf"
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.encrypt("", owner_password="sortly-test-owner", algorithm="AES-256")
+        with source.open("wb") as stream:
+            writer.write(stream)
+
+        extraction = extract_content(str(source), max_chars=200)
+
+        self.assertEqual(extraction.detected_type, ".pdf")
+        self.assertIn(extraction.parser_status, {"parsed", "fallback", "unavailable"})
+
     def test_uncertain_text_format_keeps_original_extension(self):
         source = self.root / "meeting_notes.md"
         source.write_text(

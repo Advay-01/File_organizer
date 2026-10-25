@@ -13,6 +13,7 @@ hiddenimports = (
     collect_submodules("uvicorn.loops")
     + collect_submodules("uvicorn.lifespan")
     + collect_submodules("uvicorn.protocols")
+    + collect_submodules("pypdf._crypt_providers")
     + collect_submodules("litellm")
 )
 datas = collect_data_files("litellm")

@@ -478,11 +478,11 @@ def extract_content(path: str, max_chars: int = 600) -> ContentExtraction:
             )
 
         if ext == ".pdf":
-            from pypdf.errors import PdfReadError
+            from pypdf.errors import DependencyError, PdfReadError
 
             try:
                 return _parsed_content(_read_pdf(p, max_chars), max_chars, ".pdf", ("PDF signature",))
-            except (OSError, ValueError, PdfReadError):
+            except (OSError, ValueError, DependencyError, PdfReadError):
                 return _fallback_content(p, max_chars, ext, "PDF")
 
         if ext == ".docx":
