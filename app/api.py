@@ -208,6 +208,7 @@ class StoredPlan:
 
 
 plans: Dict[str, StoredPlan] = {}
+APPLY_LOCK = Lock()
 
 
 def _target_path(move: Move) -> str:
@@ -532,11 +533,7 @@ def preview(request: PreviewRequest) -> PreviewResponse:
     )
 
 
-@app.post("/api/apply")
-def apply(request: ApplyRequest) -> dict:
-    plan = plans.get(request.plan_id)
-    if plan is None:
-        raise HTTPException(404, "Preview expired. Create a new preview before organizing.")
+def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
     with plan.lock:
         if plan.attempted:
             raise HTTPException(
@@ -596,13 +593,32 @@ def apply(request: ApplyRequest) -> dict:
         return payload
 
 
+@app.post("/api/apply")
+def apply(request: ApplyRequest) -> dict:
+    plan = plans.get(request.plan_id)
+    if plan is None:
+        raise HTTPException(404, "Preview expired. Create a new preview before organizing.")
+    if not APPLY_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another Apply operation is already running.")
+    try:
+        return _apply_plan(plan, request)
+    finally:
+        APPLY_LOCK.release()
+
+
 @app.post("/api/undo")
 def undo(request: UndoRequest) -> dict:
     source = Path(request.source).expanduser().resolve()
     if not source.is_dir():
         raise HTTPException(400, "Choose an existing folder.")
     result = history.undo_last_run(str(source))
-    return {"restored": result["restored"] if result else 0}
+    if result is None:
+        return {"status": "none", "restored": 0, "skipped": []}
+    return {
+        "status": result["status"],
+        "restored": result["restored"],
+        "skipped": result["skipped"],
+    }
 
 
 @app.post("/api/open-folder")

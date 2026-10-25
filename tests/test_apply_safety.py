@@ -1,8 +1,12 @@
 """Failure-safety regressions for the Apply and Undo transaction boundary."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -82,6 +86,103 @@ class ApplySafetyTests(unittest.TestCase):
         self.assertTrue(self.second.is_file())
         self.assertFalse((self.root / "Docs").exists())
 
+    def test_overlapping_apply_runs_both_remain_in_the_journal(self):
+        first = self.root / "overlap-first.txt"
+        second = self.root / "overlap-second.txt"
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        first_loaded = threading.Event()
+        allow_first_write = threading.Event()
+        real_load = history.load_history_for_update
+        load_count = 0
+        load_count_lock = threading.Lock()
+
+        def delayed_load(output_root: str) -> list[dict]:
+            nonlocal load_count
+            entries = real_load(output_root)
+            with load_count_lock:
+                load_count += 1
+                current = load_count
+            if current == 1:
+                first_loaded.set()
+                allow_first_write.wait(timeout=5)
+            return entries
+
+        errors: list[BaseException] = []
+
+        def apply(move: Move) -> None:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    executor.execute_plan([move], str(self.root), dry_run=False)
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(
+                target=apply,
+                args=(Move(str(first), str(self.root / "One" / first.name), "One", "x"),),
+            ),
+            threading.Thread(
+                target=apply,
+                args=(Move(str(second), str(self.root / "Two" / second.name), "Two", "x"),),
+            ),
+        ]
+        with patch("app.core.history.load_history_for_update", side_effect=delayed_load):
+            with patch(
+                "app.core.executor.load_history_for_update",
+                side_effect=delayed_load,
+                create=True,
+            ):
+                threads[0].start()
+                self.assertTrue(first_loaded.wait(timeout=5))
+                threads[1].start()
+                time.sleep(0.2)
+                allow_first_write.set()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+        self.assertFalse(errors)
+        self.assertTrue((self.root / "One" / first.name).is_file())
+        self.assertTrue((self.root / "Two" / second.name).is_file())
+        runs = history.list_runs(str(self.root))
+        self.assertEqual(len(runs), 2)
+        self.assertEqual({tuple(run["sample"][0][key] for key in ("from", "to")) for run in runs}, {
+            ("overlap-first.txt", "overlap-first.txt"),
+            ("overlap-second.txt", "overlap-second.txt"),
+        })
+
+    def test_concurrent_apply_request_is_rejected(self):
+        self.plan()
+        started = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+
+        def blocked_apply(_plan, _request):
+            started.set()
+            release.wait(timeout=5)
+            return {"status": "success"}
+
+        def run_apply() -> None:
+            try:
+                api.apply(self.request())
+            except BaseException as error:
+                errors.append(error)
+
+        with patch("app.api._apply_plan", side_effect=blocked_apply):
+            thread = threading.Thread(target=run_apply)
+            thread.start()
+            self.assertTrue(started.wait(timeout=5))
+            try:
+                with self.assertRaises(api.HTTPException) as caught:
+                    api.apply(self.request())
+            finally:
+                release.set()
+            thread.join(timeout=5)
+
+        self.assertFalse(errors)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("Another Apply operation", str(caught.exception.detail))
+
     def test_undo_log_failure_before_first_move_moves_nothing(self):
         self.plan()
         (self.root / history.UNDO_LOG).write_text("{invalid json", encoding="utf-8")
@@ -131,7 +232,7 @@ class ApplySafetyTests(unittest.TestCase):
 
     def test_undo_log_failure_after_move_keeps_a_recoverable_record(self):
         self.plan()
-        real_write = executor.write_history
+        real_write = history.write_history
         calls = 0
 
         def fail_completion_write(output_root: str, entries: list[dict]) -> None:
@@ -142,7 +243,7 @@ class ApplySafetyTests(unittest.TestCase):
             real_write(output_root, entries)
 
         with self.assertLogs("app.core.executor", level="ERROR") as logs:
-            with patch("app.core.executor.write_history", side_effect=fail_completion_write):
+            with patch("app.core.history.write_history", side_effect=fail_completion_write):
                 response = api.apply(self.request())
 
         payload = self.response_json(response)
@@ -254,6 +355,45 @@ class ApiErrorBoundaryTests(unittest.TestCase):
         self.assertEqual(response.headers["access-control-allow-origin"], "http://tauri.localhost")
         self.assertIn("Traceback", "\n".join(logs.output))
         self.assertTrue(source.is_file())
+
+    def test_undo_reports_source_and_destination_conflict(self):
+        source = self.root / "both.txt"
+        destination = self.root / "Docs" / "both.txt"
+        destination.parent.mkdir()
+        source.write_text("source", encoding="utf-8")
+        destination.write_text("destination", encoding="utf-8")
+        history.write_history(str(self.root), [{
+            "state": "completed",
+            "moves": [{"src": str(source), "dest": str(destination), "completed": True}],
+        }])
+
+        result = api.undo(api.UndoRequest(source=str(self.root)))
+
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["restored"], 0)
+        self.assertEqual(result["skipped"], [{
+            "file": "both.txt",
+            "reason": "original location is already occupied",
+        }])
+        self.assertEqual(source.read_text(encoding="utf-8"), "source")
+        self.assertEqual(destination.read_text(encoding="utf-8"), "destination")
+
+    def test_undo_reports_when_source_and_destination_are_both_missing(self):
+        source = self.root / "gone.txt"
+        destination = self.root / "Docs" / "gone.txt"
+        history.write_history(str(self.root), [{
+            "state": "completed",
+            "moves": [{"src": str(source), "dest": str(destination), "completed": True}],
+        }])
+
+        result = api.undo(api.UndoRequest(source=str(self.root)))
+
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["restored"], 0)
+        self.assertEqual(result["skipped"], [{
+            "file": "gone.txt",
+            "reason": "file is no longer there",
+        }])
 
 
 if __name__ == "__main__":

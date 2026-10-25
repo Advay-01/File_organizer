@@ -10,8 +10,7 @@ from uuid import uuid4
 
 from app.core.history import (
     UndoLogError,
-    load_history_for_update,
-    write_history,
+    update_history,
 )
 from app.core.planner import Move
 from app.core.safety import UnsafePathError, move_file_no_overwrite, validate_move_paths
@@ -57,6 +56,21 @@ def _journal_write_failure(result: ExecutionResult, action: str, error: UndoLogE
         "No further files will be moved; review History or Undo before trying again."
     )
     result.state = "partial" if result.moved else "failed"
+
+
+def _append_run(output_root: str, entry: dict) -> None:
+    update_history(output_root, lambda entries: entries.append(entry))
+
+
+def _update_run(output_root: str, entry: dict) -> None:
+    def replace(entries: list[dict]) -> None:
+        for index, current in enumerate(entries):
+            if current.get("run_id") == entry["run_id"]:
+                entries[index] = entry
+                return
+        raise UndoLogError("The pending undo record is missing.")
+
+    update_history(output_root, replace)
 
 
 def execute_plan(
@@ -126,9 +140,7 @@ def execute_plan(
         "failures": list(result.failures),
     }
     try:
-        history_entries = load_history_for_update(output_root)
-        history_entries.append(entry)
-        write_history(output_root, history_entries)
+        _append_run(output_root, entry)
         result.undo_available = True
     except UndoLogError as error:
         _journal_write_failure(
@@ -141,7 +153,7 @@ def execute_plan(
     for m, src, dest, record in move_plan:
         record["started"] = True
         try:
-            write_history(output_root, history_entries)
+            _update_run(output_root, entry)
         except UndoLogError as error:
             _journal_write_failure(result, "Could not save move progress before moving a file", error)
             break
@@ -154,7 +166,7 @@ def execute_plan(
             result.failures.append(_failure(src.name, _move_failure_reason(error)))
             entry["failures"] = list(result.failures)
             try:
-                write_history(output_root, history_entries)
+                _update_run(output_root, entry)
             except UndoLogError as journal_error:
                 _journal_write_failure(result, "Could not save a failed move to the undo record", journal_error)
                 break
@@ -164,7 +176,7 @@ def execute_plan(
         record["completed"] = True
         result.append({"src": str(src), "dest": str(dest)})
         try:
-            write_history(output_root, history_entries)
+            _update_run(output_root, entry)
         except UndoLogError as error:
             _journal_write_failure(result, "A file moved but its completed state could not be saved", error)
             break
@@ -174,7 +186,7 @@ def execute_plan(
     )
     entry["failures"] = list(result.failures)
     try:
-        write_history(output_root, history_entries)
+        _update_run(output_root, entry)
     except UndoLogError as error:
         _journal_write_failure(result, "Could not finalize the undo record", error)
 

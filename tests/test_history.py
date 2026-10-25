@@ -98,6 +98,52 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(history.undo_last_run(str(self.root))["id"], 0)
         self.assertIsNone(history.undo_last_run(str(self.root)))
 
+    def test_empty_interrupted_run_is_abandoned_without_blocking_older_undo(self):
+        self.apply([("a.txt", "AI", None)])
+        entries = history.load_history_for_update(str(self.root))
+        entries.append({
+            "run_id": "empty-intent",
+            "time": "2099-01-01T00:00:00",
+            "state": "applying",
+            "moves": [{
+                "src": str(self.root / "never.txt"),
+                "dest": str(self.root / "AI" / "never.txt"),
+                "started": False,
+                "completed": False,
+            }],
+        })
+        history.write_history(str(self.root), entries)
+
+        result = history.undo_last_run(str(self.root))
+
+        self.assertEqual((result["id"], result["restored"], result["status"]), (0, 1, "undone"))
+        self.assertTrue((self.root / "a.txt").is_file())
+        saved = history.load_history_for_update(str(self.root))
+        self.assertEqual(saved[1]["state"], "abandoned")
+        self.assertEqual(history.list_runs(str(self.root))[0]["status"], "abandoned")
+
+    def test_started_but_unresolved_run_is_not_skipped_as_empty(self):
+        self.apply([("a.txt", "AI", None)])
+        entries = history.load_history_for_update(str(self.root))
+        entries.append({
+            "run_id": "uncertain-intent",
+            "time": "2099-01-01T00:00:00",
+            "state": "applying",
+            "moves": [{
+                "src": str(self.root / "uncertain.txt"),
+                "dest": str(self.root / "AI" / "uncertain.txt"),
+                "started": True,
+                "completed": False,
+            }],
+        })
+        history.write_history(str(self.root), entries)
+
+        result = history.undo_last_run(str(self.root))
+
+        self.assertEqual((result["id"], result["restored"], result["status"]), (1, 0, "applying"))
+        self.assertFalse((self.root / "a.txt").exists())
+        self.assertTrue((self.root / "AI" / "a.txt").is_file())
+
     def test_tampered_log_cannot_touch_files_outside_output_folder(self):
         outside = tempfile.TemporaryDirectory()
         victim = Path(outside.name) / "secret.txt"

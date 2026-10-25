@@ -1637,6 +1637,11 @@ button:disabled {
     background: var(--danger-soft);
   }
 
+  .history-status[data-status="abandoned"] {
+    color: var(--text-muted);
+    background: var(--surface-inset);
+  }
+
   .history-status[data-status="undone"] {
     color: var(--text-muted);
     background: var(--surface-inset);

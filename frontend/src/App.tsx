@@ -51,6 +51,7 @@ import {
   type ReviewFilter,
   type ReviewStats,
 } from "./lib/review";
+import { describeUndoResult, type UndoResult } from "./lib/undo";
 
 const BROWSER_API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
 const DESKTOP = isTauri();
@@ -446,10 +447,17 @@ export default function App() {
     setBusy("undo");
     setError("");
     try {
-      const result = await request<{ restored: number }>(apiBase, "/api/undo", { source });
-      setMessage(result.restored ? `Restored ${result.restored} files.` : "There was no organization run to undo.");
-      setUndoAvailable(false);
-      setCompletion(null);
+      const result = await request<UndoResult>(apiBase, "/api/undo", { source });
+      const feedback = describeUndoResult(result);
+      if (feedback.tone === "success") {
+        setMessage(feedback.message);
+        setError("");
+      } else {
+        setMessage("");
+        setError(feedback.message);
+      }
+      setUndoAvailable(feedback.recoveryAvailable);
+      if (!feedback.recoveryAvailable) setCompletion(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Undo could not be completed.");
     } finally {
