@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 from app.core import llm_http
-from app.core.classifier import extract_json
+from app.core.classifier import extract_json, temperature_rejected
 from app.core.extractor import extract_snippet
 from app.core.planner import Move
 from app.models.schemas import FileInfo
@@ -370,10 +370,13 @@ async def _litellm_call(model: str, messages: List[dict], params: dict) -> str:
     import litellm
 
     litellm.drop_params = True  # ignore params a provider does not support
-    resp = await litellm.acompletion(
-        model=model, messages=messages, temperature=0,
-        response_format={"type": "json_object"}, **params,
-    )
+    kwargs = dict(model=model, messages=messages, response_format={"type": "json_object"}, **params)
+    try:
+        resp = await litellm.acompletion(temperature=0, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - retry once without temperature, otherwise re-raise
+        if not temperature_rejected(exc):
+            raise
+        resp = await litellm.acompletion(**kwargs)
     return resp.choices[0].message.content or ""
 
 

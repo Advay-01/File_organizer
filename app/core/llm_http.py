@@ -123,10 +123,12 @@ def _anthropic_request(
         if message.get("role") != "system"
     ]
     extra_body = extra_body or {}
+    # No default "temperature": newer Claude models (e.g. claude-haiku-5-5) reject it with
+    # HTTP 400 ("`temperature` is deprecated for this model"). Older models can still opt in via
+    # ORGANIZER_LLM_PARAMS, e.g. {"anthropic": {"temperature": 0}}; build_params() merges it below.
     body = {
         "model": name,
         "max_tokens": int(extra_body.get("max_tokens", 4096)),
-        "temperature": 0,
         "messages": conversation,
     }
     if system_parts:

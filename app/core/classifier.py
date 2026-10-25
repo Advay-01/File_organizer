@@ -21,16 +21,29 @@ from app.models.schemas import OrganizerResponse
 CompletionFn = Callable[[str, List[dict]], str]
 
 
+def temperature_rejected(exc: Exception) -> bool:
+    """True when a provider refuses the `temperature` parameter (newer models deprecate it)."""
+    text = str(exc).lower()
+    return "temperature" in text and any(
+        phrase in text for phrase in ("deprecated", "not supported", "unsupported")
+    )
+
+
 def _litellm_completion(model: str, messages: List[dict]) -> str:
     import litellm
 
-    resp = litellm.completion(
+    kwargs = dict(
         model=model,
         messages=messages,
-        temperature=0.1,
         response_format={"type": "json_object"},
         timeout=120,
     )
+    try:
+        resp = litellm.completion(temperature=0.1, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - retry once without temperature, otherwise re-raise
+        if not temperature_rejected(exc):
+            raise
+        resp = litellm.completion(**kwargs)
     return resp.choices[0].message.content or ""
 
 

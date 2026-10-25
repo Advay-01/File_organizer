@@ -2,10 +2,13 @@
 import asyncio
 import json
 import os
+import sys
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.core import llm_http
 from app.core.fast_planner import FastConfig, plan_files_fast
@@ -183,6 +186,96 @@ class StatsContractTests(unittest.TestCase):
         for n in (60, 400):
             res = self._run(n)
             self.assertTrue(self.KEYS <= set(res.stats), (n, self.KEYS - set(res.stats)))
+
+
+class AnthropicRequestTests(unittest.TestCase):
+    """Regression: claude-haiku-5-5 answers HTTP 400 when `temperature` is present."""
+
+    MSGS = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+
+    def setUp(self):
+        self._old = os.environ.get("ANTHROPIC_API_KEY")
+        os.environ["ANTHROPIC_API_KEY"] = "test-key"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = self._old
+
+    def _body(self, user_params=None):
+        _url, _headers, data = llm_http.build_request(
+            "anthropic/claude-haiku-5-5", self.MSGS, user_params
+        )
+        return json.loads(data)
+
+    def test_no_temperature_by_default(self):
+        body = self._body()
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body["system"], "sys")
+        self.assertEqual(body["messages"], [{"role": "user", "content": "hi"}])
+
+    def test_temperature_can_be_opted_in_for_older_models(self):
+        body = self._body({"anthropic": {"temperature": 0}})
+        self.assertEqual(body["temperature"], 0)
+
+
+class TemperatureFallbackTests(unittest.TestCase):
+    def test_rejection_check_ignores_unrelated_provider_errors(self):
+        from app.core.classifier import temperature_rejected
+
+        self.assertTrue(
+            temperature_rejected(Exception("`temperature` is deprecated for this model."))
+        )
+        self.assertTrue(
+            temperature_rejected(Exception("Unsupported parameter: temperature"))
+        )
+        self.assertFalse(temperature_rejected(Exception("rate limit exceeded")))
+        self.assertFalse(temperature_rejected(Exception("invalid api key")))
+
+    def test_classifier_retries_once_without_temperature(self):
+        from app.core.classifier import _litellm_completion
+
+        calls = []
+
+        def completion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise Exception("Unsupported parameter: temperature")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
+            )
+
+        fake_litellm = SimpleNamespace(completion=completion)
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            output = _litellm_completion("provider/model", [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(output, '{"ok": true}')
+        self.assertEqual(calls[0]["temperature"], 0.1)
+        self.assertNotIn("temperature", calls[1])
+
+    def test_fast_planner_retries_once_without_temperature(self):
+        from app.core.fast_planner import _litellm_call
+
+        calls = []
+
+        async def acompletion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise Exception("temperature is not supported")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
+            )
+
+        fake_litellm = SimpleNamespace(acompletion=acompletion)
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            output = asyncio.run(
+                _litellm_call("provider/model", [{"role": "user", "content": "hi"}], {})
+            )
+
+        self.assertEqual(output, '{"ok": true}')
+        self.assertEqual(calls[0]["temperature"], 0)
+        self.assertNotIn("temperature", calls[1])
 
 
 if __name__ == "__main__":
