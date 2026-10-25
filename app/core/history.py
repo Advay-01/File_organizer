@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TypeVar
 
 from app.core.safety import (
     UnsafePathError,
@@ -29,6 +31,12 @@ from app.core.safety import (
 
 UNDO_LOG = ".organizer_undo.json"
 SAMPLE_SIZE = 5
+_JOURNAL_LOCK = threading.RLock()
+T = TypeVar("T")
+
+
+class UndoLogError(OSError):
+    """The undo journal cannot be read or updated safely."""
 
 
 # --------------------------------------------------------------------------- log io
@@ -38,28 +46,115 @@ def _log_path(output_root: str) -> Path:
     return Path(output_root) / UNDO_LOG
 
 
-def _load(output_root: str) -> List[dict]:
-    """Read the log; a missing, unreadable or corrupt file simply means 'no history'."""
+def load_history_for_update(output_root: str) -> List[dict]:
+    """Load and validate an existing journal before a destructive operation."""
     p = _log_path(output_root)
+    if not p.exists():
+        return []
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+    except (OSError, ValueError) as error:
+        raise UndoLogError("The undo record could not be read safely.") from error
+    if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
+        raise UndoLogError("The undo record is not valid.")
+    for entry in data:
+        moves = entry.get("moves", [])
+        if not isinstance(moves, list) or any(
+            not isinstance(move, dict)
+            or not isinstance(move.get("src"), str)
+            or not isinstance(move.get("dest"), str)
+            for move in moves
+        ):
+            raise UndoLogError("The undo record contains an invalid move.")
+    return data
 
 
-def _save(output_root: str, history: List[dict]) -> None:
+def write_history(output_root: str, entries: List[dict]) -> None:
+    """Atomically persist a complete journal with retries for transient Windows locks."""
     p = _log_path(output_root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise UndoLogError("The undo record directory could not be opened safely.") from error
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    os.replace(tmp, p)  # atomic: a crash never leaves a half-written log
+    with _JOURNAL_LOCK:
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(entries, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as error:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise UndoLogError("The undo record could not be written safely.") from error
 
+        last_error: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp, p)
+                return
+            except OSError as error:
+                last_error = error
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise UndoLogError("The undo record is temporarily locked.") from last_error
+
+
+def update_history(output_root: str, update: Callable[[List[dict]], T]) -> T:
+    """Serialize a complete journal read-modify-write transaction."""
+    with _JOURNAL_LOCK:
+        entries = load_history_for_update(output_root)
+        result = update(entries)
+        write_history(output_root, entries)
+        return result
+
+
+def _load(output_root: str) -> List[dict]:
+    """Read the log; a missing, unreadable or corrupt file simply means 'no history'."""
+    try:
+        data = load_history_for_update(output_root)
+    except UndoLogError:
+        return []
+    return data
 
 # --------------------------------------------------------------------------- helpers
 
 
-def _moves(entry: dict) -> List[dict]:
-    return [m for m in entry.get("moves", []) if isinstance(m, dict) and "src" in m and "dest" in m]
+def _all_moves(entry: dict) -> List[dict]:
+    return [
+        m
+        for m in entry.get("moves", [])
+        if isinstance(m, dict) and isinstance(m.get("src"), str) and isinstance(m.get("dest"), str)
+    ]
+
+
+def _moves(entry: dict, output_root: str | None = None) -> List[dict]:
+    """Return completed moves, including a move interrupted before its final journal update."""
+    moves = []
+    for move in _all_moves(entry):
+        if move.get("completed", True):
+            moves.append(move)
+            continue
+        if not output_root or not move.get("started"):
+            continue
+        src, dest = Path(move["src"]), Path(move["dest"])
+        try:
+            interrupted_move_completed = (
+                _inside(move["dest"], output_root) and dest.exists() and not src.exists()
+            )
+        except OSError:
+            interrupted_move_completed = False
+        if interrupted_move_completed:
+            move["completed"] = True
+            move["started"] = False
+            moves.append(move)
+    return moves
 
 
 def _folder_of(dest: str, output_root: str) -> str:
@@ -69,10 +164,18 @@ def _folder_of(dest: str, output_root: str) -> str:
         return Path(dest).parent.name or "."
 
 
-def _status(entry: dict) -> str:
-    moves = _moves(entry)
+def _status(entry: dict, output_root: str) -> str:
+    moves = _moves(entry, output_root)
     done = sum(1 for m in moves if m.get("restored"))
-    if not moves or done == 0:
+    if not moves:
+        return str(entry.get("state", "applied"))
+    if done == 0:
+        if entry.get("state") == "applying":
+            return "partial"
+        if entry.get("state") == "failed":
+            return "failed"
+        if entry.get("state") == "partial":
+            return "partial"
         return "applied"
     return "undone" if done == len(moves) else "partially undone"
 
@@ -103,14 +206,14 @@ def list_runs(output_root: str) -> List[dict]:
     """Newest first. `id` is the run's position in the log and is what undo_run takes."""
     runs = []
     for i, entry in enumerate(_load(output_root)):
-        moves = _moves(entry)
+        moves = _moves(entry, output_root)
         runs.append({
             "id": i,
             "time": entry.get("time", ""),
             "files": len(moves),
             "renamed": sum(1 for m in moves if Path(m["src"]).name != Path(m["dest"]).name),
             "folders": dict(Counter(_folder_of(m["dest"], output_root) for m in moves).most_common()),
-            "status": _status(entry),
+            "status": _status(entry, output_root),
             "undone_at": entry.get("undone_at"),
             "sample": [{"from": Path(m["src"]).name, "to": Path(m["dest"]).name,
                         "folder": _folder_of(m["dest"], output_root)} for m in moves[:SAMPLE_SIZE]],
@@ -130,8 +233,8 @@ def get_run(output_root: str, run_id: int) -> dict:
         "folder": _folder_of(m["dest"], output_root),
         "renamed": Path(m["src"]).name != Path(m["dest"]).name,
         "restored": bool(m.get("restored")),
-    } for m in _moves(entry)]
-    return {"id": run_id, "time": entry.get("time", ""), "status": _status(entry),
+    } for m in _moves(entry, output_root)]
+    return {"id": run_id, "time": entry.get("time", ""), "status": _status(entry, output_root),
             "undone_at": entry.get("undone_at"), "moves": moves}
 
 
@@ -142,46 +245,95 @@ def undo_run(output_root: str, run_id: int) -> Dict[str, object]:
     if not (0 <= run_id < len(history)):
         raise KeyError(run_id)
     entry = history[run_id]
-    if _status(entry) == "undone":
+    if _status(entry, output_root) == "undone":
         raise ValueError("this run was already undone")
 
+    moves = _all_moves(entry)
+    if not any(move.get("started") or move.get("completed") for move in moves):
+        def abandon(entries: List[dict]) -> None:
+            current = entries[run_id]
+            current_moves = _all_moves(current)
+            if any(move.get("started") or move.get("completed") for move in current_moves):
+                raise UndoLogError("The interrupted run became active during recovery.")
+            current["state"] = "abandoned"
+            current["abandoned_at"] = datetime.now().isoformat(timespec="seconds")
+
+        update_history(output_root, abandon)
+        return {
+            "restored": 0,
+            "skipped": [],
+            "status": "abandoned",
+            "abandoned": True,
+        }
+
     restored, skipped = 0, []
-    for m in reversed(_moves(entry)):
+    for m in reversed(_moves(entry, output_root)):
         if m.get("restored"):
             continue
         src, dest = Path(m["src"]), Path(m["dest"])
-        if not _inside(m["dest"], output_root):
-            skipped.append({"file": dest.name, "reason": "outside the output folder (log ignored)"})
-        elif not dest.exists():
-            skipped.append({"file": dest.name, "reason": "file is no longer there"})
-        elif src.exists():
-            skipped.append({"file": dest.name, "reason": "original location is already occupied"})
-        else:
+        try:
+            if not _inside(m["dest"], output_root):
+                skipped.append({"file": dest.name, "reason": "outside the output folder (log ignored)"})
+                continue
+            if not dest.exists():
+                skipped.append({"file": dest.name, "reason": "file is no longer there"})
+                continue
+            if src.exists():
+                skipped.append({"file": dest.name, "reason": "original location is already occupied"})
+                continue
             try:
                 validate_move_paths(dest, src, Path(output_root), Path(output_root))
                 src.parent.mkdir(parents=True, exist_ok=True)
                 move_file_no_overwrite(dest, src)
-            except UnsafePathError as error:
-                skipped.append({"file": dest.name, "reason": f"unsafe path: {error}"})
+            except UnsafePathError:
+                skipped.append({"file": dest.name, "reason": "the path did not pass safety checks"})
                 continue
-            except OSError as e:
-                skipped.append({"file": dest.name, "reason": f"error: {e}"})
+            except OSError as error:
+                reason = (
+                    "file is locked or access was denied"
+                    if isinstance(error, PermissionError)
+                    else "the file could not be moved safely"
+                )
+                skipped.append({"file": dest.name, "reason": reason})
                 continue
-            m["restored"] = True
-            restored += 1
-            _prune_empty_dirs(dest.parent, Path(output_root))
 
-    if restored:
-        entry["undone_at"] = datetime.now().isoformat(timespec="seconds")
-        _save(output_root, history)
-    return {"restored": restored, "skipped": skipped, "status": _status(entry)}
+            def mark_restored(entries: List[dict]) -> None:
+                current = entries[run_id]
+                for move in _all_moves(current):
+                    if move["src"] == m["src"] and move["dest"] == m["dest"]:
+                        move["started"] = False
+                        move["completed"] = True
+                        move["restored"] = True
+                        current["undone_at"] = datetime.now().isoformat(timespec="seconds")
+                        return
+                raise UndoLogError("The completed move is missing from the undo record.")
+
+            restored += 1
+            update_history(output_root, mark_restored)
+            _prune_empty_dirs(dest.parent, Path(output_root))
+        except UndoLogError:
+            skipped.append({
+                "file": dest.name,
+                "reason": "restored, but the undo record could not be updated",
+            })
+            break
+
+    latest = _load(output_root)
+    status = (
+        _status(latest[run_id], output_root)
+        if 0 <= run_id < len(latest)
+        else _status(entry, output_root)
+    )
+    return {"restored": restored, "skipped": skipped, "status": status}
 
 
 def undo_last_run(output_root: str) -> Optional[Dict[str, object]]:
     """Undo the newest run that still has something to restore; None if there is none."""
     for run in list_runs(output_root):
-        if run["status"] != "undone":
+        if run["status"] not in {"undone", "abandoned"}:
             res = undo_run(output_root, run["id"])
+            if res.get("abandoned"):
+                continue
             res["id"] = run["id"]
             return res
     return None

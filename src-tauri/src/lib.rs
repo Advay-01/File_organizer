@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -283,10 +283,62 @@ fn start_sidecar(handle: AppHandle) {
         };
         let terminated = Arc::new(AtomicBool::new(false));
         let terminated_for_events = Arc::clone(&terminated);
+        let event_handle = handle.clone();
+        let sidecar_log = data_dir.join("sidecar.log");
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sidecar_log)
+            .ok();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = events.recv().await {
-                if matches!(event, CommandEvent::Terminated(_)) {
-                    terminated_for_events.store(true, Ordering::Release);
+                match event {
+                    CommandEvent::Stderr(bytes) | CommandEvent::Stdout(bytes) => {
+                        if let Some(file) = log_file.as_mut() {
+                            let text = String::from_utf8_lossy(&bytes);
+                            let _ = writeln!(file, "{text}");
+                        }
+                        if diagnostics {
+                            eprintln!("{}", String::from_utf8_lossy(&bytes));
+                        }
+                    }
+                    CommandEvent::Error(error) => {
+                        if let Some(file) = log_file.as_mut() {
+                            let _ = writeln!(file, "Sidecar process error: {error}");
+                        }
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        terminated_for_events.store(true, Ordering::Release);
+                        if let Some(file) = log_file.as_mut() {
+                            let _ = writeln!(
+                                file,
+                                "Sidecar stopped (code: {:?}, signal: {:?}).",
+                                payload.code, payload.signal
+                            );
+                        }
+                        let stopped_unexpectedly = event_handle
+                            .try_state::<SidecarState>()
+                            .map(|state| {
+                                let runtime = state.0.lock().unwrap();
+                                runtime.status.state == "ready" && !runtime.stopping
+                            })
+                            .unwrap_or(false);
+                        if stopped_unexpectedly {
+                            set_status(
+                                &event_handle,
+                                ApiStatus {
+                                    state: "error".into(),
+                                    base_url: None,
+                                    detail: Some(
+                                        "The local service stopped unexpectedly. Restart Sortly and check History before retrying."
+                                            .into(),
+                                    ),
+                                    timing: None,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         });

@@ -11,7 +11,7 @@ import { Button } from "./ui/button";
  *   <HistoryPanel />                                 // runs from every folder organized so far
  */
 
-type Status = "applied" | "undone" | "partially undone";
+type Status = "applied" | "partial" | "failed" | "applying" | "abandoned" | "undone" | "partially undone";
 
 interface Run {
   id: number;
@@ -53,6 +53,10 @@ const MAX_MOVES_SHOWN = 100;
 
 const STATUS_LABELS: Record<Status, string> = {
   applied: "Completed",
+  partial: "Partially applied",
+  failed: "Failed",
+  applying: "Interrupted",
+  abandoned: "Abandoned",
   undone: "Undone",
   "partially undone": "Partially undone",
 };
@@ -282,7 +286,7 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
                         {moves.length > MAX_MOVES_SHOWN && (
                           <p className="history-muted">Showing the first {MAX_MOVES_SHOWN} of {moves.length} recorded moves.</p>
                         )}
-                        {run.status !== "undone" && (
+                        {run.status !== "undone" && run.status !== "abandoned" && (
                           <div className="history-detail-footer">
                             <p>Undo only moves files still present at their recorded destinations. Other items are skipped safely.</p>
                             <Button

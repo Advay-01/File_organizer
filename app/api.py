@@ -7,15 +7,18 @@ again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
+import re
 import subprocess
 import sys
+from threading import Lock
 from time import perf_counter
 from typing import Dict, List
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,6 +47,11 @@ from app.history_api import router as history_router
 load_dotenv()
 
 app = FastAPI(title="Sortly Local API")
+logger = logging.getLogger(__name__)
+LOCAL_ORIGIN_PATTERN = (
+    r"^(https?://(?:127\.0\.0\.1|localhost)(?::\d+)?"
+    r"|https?://tauri\.localhost|tauri://localhost)$"
+)
 
 
 @app.exception_handler(RequestValidationError)
@@ -69,10 +77,42 @@ app.add_middleware(
         "https://tauri.localhost",
         "tauri://localhost",
     ],
-    allow_methods=["GET", "POST"],
+    allow_origin_regex=LOCAL_ORIGIN_PATTERN,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
+    allow_private_network=True,
+    max_age=600,
 )
 app.include_router(history_router)
+
+
+@app.middleware("http")
+async def unexpected_error(request: Request, call_next):
+    """Keep crash responses JSON and CORS-readable while logging diagnostics locally."""
+    try:
+        return await call_next(request)
+    except Exception as error:
+        logger.error(
+            "Unhandled API error for %s %s",
+            request.method,
+            request.url.path,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        headers = {}
+        origin = request.headers.get("origin", "")
+        if re.fullmatch(LOCAL_ORIGIN_PATTERN, origin):
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Vary"] = "Origin"
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    "The local service encountered an unexpected error. "
+                    "Check Sortly's local log and History before trying again."
+                )
+            },
+            headers=headers,
+        )
 
 
 class PreviewRequest(BaseModel):
@@ -162,9 +202,13 @@ class StoredPlan:
     moves: List[Move]
     suggestions: List[ContentSuggestion] = field(default_factory=list)
     applied: bool = False
+    attempted: bool = False
+    apply_state: str = "preview"
+    lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
 plans: Dict[str, StoredPlan] = {}
+APPLY_LOCK = Lock()
 
 
 def _target_path(move: Move) -> str:
@@ -217,7 +261,11 @@ def _validate_for_apply(plan: StoredPlan) -> None:
         try:
             validate_move_paths(source, destination, plan.source)
         except UnsafePathError as error:
-            raise HTTPException(400, f"Unsafe file operation: {error}") from error
+            logger.warning("Rejected unsafe Apply path: %s", error)
+            raise HTTPException(
+                400,
+                "The selected file or destination did not pass safety checks. Create a new preview.",
+            ) from error
 
 
 def _hierarchy(root: Path, moves: List[dict]) -> dict:
@@ -485,36 +533,77 @@ def preview(request: PreviewRequest) -> PreviewResponse:
     )
 
 
+def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
+    with plan.lock:
+        if plan.attempted:
+            raise HTTPException(
+                409,
+                "This preview has already been used by an Apply attempt. Create a new preview.",
+            )
+        sanity = evaluate_plan(plan.suggestions)
+        if sanity.requires_confirmation and not request.risk_acknowledged:
+            raise HTTPException(409, "Review and acknowledge the unusual plan warnings before organizing.")
+
+        # Mark the preview before touching disk so a concurrent request cannot
+        # execute it a second time.
+        plan.attempted = True
+        plan.apply_state = "applying"
+        plan.moves = _apply_user_edits(plan, request)
+        for move in plan.moves:
+            move.src = str(_resolve_plan_source(move.src, plan.source))
+
+        _validate_for_apply(plan)
+        requested = sum(1 for move in plan.moves if move.selected)
+        result = execute_plan(
+            plan.moves,
+            str(plan.source),
+            dry_run=False,
+            source_root=str(plan.source),
+        )
+        plan.apply_state = result.state
+        plan.applied = result.state == "success"
+        if result.moved:
+            history.remember_folder(str(plan.source))
+
+        payload = {
+            "status": result.state,
+            "moved": result.moved,
+            "requested": requested,
+            "failed": result.failed,
+            "failures": result.failures,
+            "kept_in_root": sum(not move.selected for move in plan.moves),
+            "undo_available": result.undo_available and result.moved > 0,
+            "hierarchy": _hierarchy(plan.source, result),
+        }
+        if result.log_error:
+            payload["detail"] = result.log_error
+            return JSONResponse(status_code=207 if result.moved else 500, content=payload)
+        if result.state == "partial":
+            payload["detail"] = (
+                f"{result.moved} file(s) moved; {result.failed} could not be moved. "
+                "Review History or Undo before trying again."
+            )
+            return JSONResponse(status_code=207, content=payload)
+        if result.state == "failed":
+            payload["detail"] = (
+                "No files were moved. "
+                "Review the failure reasons, then create a new preview before trying again."
+            )
+            return JSONResponse(status_code=500, content=payload)
+        return payload
+
+
 @app.post("/api/apply")
 def apply(request: ApplyRequest) -> dict:
     plan = plans.get(request.plan_id)
     if plan is None:
         raise HTTPException(404, "Preview expired. Create a new preview before organizing.")
-    if plan.applied:
-        raise HTTPException(409, "This preview has already been applied. Create a new preview.")
-    sanity = evaluate_plan(plan.suggestions)
-    if sanity.requires_confirmation and not request.risk_acknowledged:
-        raise HTTPException(409, "Review and acknowledge the unusual plan warnings before organizing.")
-
-    plan.moves = _apply_user_edits(plan, request)
-    for move in plan.moves:
-        move.src = str(_resolve_plan_source(move.src, plan.source))
-
-    _validate_for_apply(plan)
-    done = execute_plan(
-        plan.moves,
-        str(plan.source),
-        dry_run=False,
-        source_root=str(plan.source),
-    )
-    plan.applied = True
-    if done:
-        history.remember_folder(str(plan.source))
-    return {
-        "moved": len(done),
-        "kept_in_root": sum(not move.selected for move in plan.moves),
-        "hierarchy": _hierarchy(plan.source, done),
-    }
+    if not APPLY_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another Apply operation is already running.")
+    try:
+        return _apply_plan(plan, request)
+    finally:
+        APPLY_LOCK.release()
 
 
 @app.post("/api/undo")
@@ -523,7 +612,13 @@ def undo(request: UndoRequest) -> dict:
     if not source.is_dir():
         raise HTTPException(400, "Choose an existing folder.")
     result = history.undo_last_run(str(source))
-    return {"restored": result["restored"] if result else 0}
+    if result is None:
+        return {"status": "none", "restored": 0, "skipped": []}
+    return {
+        "status": result["status"],
+        "restored": result["restored"],
+        "skipped": result["skipped"],
+    }
 
 
 @app.post("/api/open-folder")
