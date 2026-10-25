@@ -29,6 +29,23 @@ class ArgumentsTests(unittest.TestCase):
         self.assertEqual(args.host, "::1")
         self.assertEqual(args.port, 9000)
 
+    def test_stdio_uses_utf8_replacement_when_available(self):
+        class Stream:
+            def __init__(self):
+                self.options = None
+
+            def reconfigure(self, **options):
+                self.options = options
+
+        stdout = Stream()
+        stderr = Stream()
+        with patch.object(desktop_server.sys, "stdout", stdout):
+            with patch.object(desktop_server.sys, "stderr", stderr):
+                desktop_server._configure_stdio()
+
+        self.assertEqual(stdout.options, {"encoding": "utf-8", "errors": "replace"})
+        self.assertEqual(stderr.options, {"encoding": "utf-8", "errors": "replace"})
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_env_file_loads_without_overriding_process_values(self):

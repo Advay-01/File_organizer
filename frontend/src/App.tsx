@@ -436,6 +436,7 @@ export default function App() {
         setUndoAvailable(true);
       }
       setError(message);
+      setMessage("");
       resetPreview();
     } finally {
       setBusy(null);

@@ -151,6 +151,44 @@ class ApplySafetyTests(unittest.TestCase):
             ("overlap-second.txt", "overlap-second.txt"),
         })
 
+    def test_unicode_filename_survives_legacy_console_encoding(self):
+        unicode_file = self.root / "résumé_café_测试.txt"
+        unicode_file.write_text("Disposable Unicode apply regression.", encoding="utf-8")
+        destination = self.root / "Unicode" / "General" / unicode_file.name
+        real_print = print
+
+        class LegacyStdout:
+            encoding = "cp1252"
+
+            def __init__(self):
+                self.buffer = io.StringIO()
+
+            def write(self, value):
+                return self.buffer.write(value)
+
+            def flush(self):
+                return self.buffer.flush()
+
+        legacy_stdout = LegacyStdout()
+
+        def cp1252_print(*args, **kwargs):
+            message = " ".join(str(value) for value in args)
+            message.encode("cp1252")
+            real_print(*args, **kwargs)
+
+        with contextlib.redirect_stdout(legacy_stdout):
+            with patch("builtins.print", side_effect=cp1252_print):
+                result = executor.execute_plan(
+                    [Move(str(unicode_file), str(destination), "Unicode", "test")],
+                    str(self.root),
+                    dry_run=False,
+                )
+
+        self.assertEqual((result.state, result.moved, result.failed), ("success", 1, 0))
+        self.assertFalse(unicode_file.exists())
+        self.assertTrue(destination.is_file())
+        self.assertEqual(history.list_runs(str(self.root))[0]["files"], 1)
+
     def test_concurrent_apply_request_is_rejected(self):
         self.plan()
         started = threading.Event()
