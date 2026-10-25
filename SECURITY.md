@@ -2,20 +2,37 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+Sortly is currently under active development. Security fixes are prioritized for the latest supported release.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| 0.1.3   | ✅ |
+| < 0.1.3 | ❌ |
+
+Please update to the latest supported version before reporting an issue, where possible.
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+If you discover a potential security vulnerability in Sortly, please report it privately rather than opening a public GitHub issue.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+**Preferred reporting method:** Use GitHub's private vulnerability reporting feature on this repository, if enabled.
+
+When reporting, include:
+- A description of the vulnerability and its potential impact.
+- Steps to reproduce the issue.
+- The affected Sortly version and operating system.
+- Relevant logs or screenshots, with personal information and sensitive file paths removed.
+
+Please do not publicly disclose the vulnerability until it has been investigated and a fix or mitigation is available.
+
+## Response and Resolution
+
+- **Acknowledgment:** We aim to acknowledge reports within 7 days.
+- **Investigation:** We will assess the report's validity, impact, and severity.
+- **Updates:** We will provide updates as the investigation progresses.
+- **Resolution:** Confirmed vulnerabilities will be prioritized according to severity and addressed through a fix or mitigation where appropriate.
+- **Disclosure:** We will coordinate public disclosure with the reporter when reasonably possible.
+
+Response times and fix availability may vary depending on severity and the maintainer's availability.
+
+Thank you for helping keep Sortly and its users safe.
