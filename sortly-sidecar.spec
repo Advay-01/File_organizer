@@ -28,7 +28,10 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # Keep optional ML runtimes out of this LLM-only desktop build.
-    excludes=["sentence_transformers", "transformers", "torch", "torchvision", "torchaudio"],
+    excludes=[
+        "sentence_transformers", "transformers", "torch", "torchvision", "torchaudio",
+        "numpy", "scipy", "sklearn",
+    ],
     noarchive=False,
     optimize=0,
 )
