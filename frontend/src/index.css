@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+.chat-log { display: grid; gap: 0.75rem; max-height: 24rem; overflow-y: auto; margin: 1rem 0; }
+.chat-message { padding: 0.75rem 1rem; border-radius: var(--radius-panel); background: var(--surface-inset); overflow-wrap: anywhere; }
+.chat-message[data-role="user"] { margin-left: 1.5rem; background: var(--accent-soft); }
+
 /*
  * Sortly design foundation
  *

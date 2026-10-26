@@ -7,6 +7,8 @@ again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
+import json
 import logging
 from pathlib import Path
 import re
@@ -25,6 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core import history, provider_catalog, provider_store
+from app.core import chat as chat_engine
 from app.core.content_intelligence import (
     ContentSuggestion,
     plan_content_intelligence,
@@ -138,6 +141,12 @@ class ApplyRequest(BaseModel):
     risk_acknowledged: bool = False
 
 
+class ChatRequest(BaseModel):
+    plan_id: str
+    message: str = Field(min_length=1, max_length=4000)
+    files: List[ApplyFile] | None = None
+
+
 class UndoRequest(BaseModel):
     source: str
 
@@ -204,6 +213,11 @@ class StoredPlan:
     applied: bool = False
     attempted: bool = False
     apply_state: str = "preview"
+    chat_rules: list[chat_engine.ChatRule] = field(default_factory=list)
+    chat_messages: list[dict] = field(default_factory=list)
+    chat_decisions: dict = field(default_factory=dict)
+    scan_summary: dict = field(default_factory=dict)
+    analysis_stats: dict = field(default_factory=dict)
     lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
@@ -359,7 +373,10 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
         target_path = edit.target_path or "/".join(
             part for part in (original.folder, original.subfolder) if part
         )
-        category, subcategory = sanitize_target_path(target_path)
+        if target_path == _target_path(original):
+            category, subcategory = original.folder, original.subfolder
+        else:
+            category, subcategory = sanitize_target_path(target_path)
         planned_extension = Path(original.dest).suffix
         source = _resolve_plan_source(original.src, plan.source)
         destination_name = sanitize_windows_filename(
@@ -492,7 +509,11 @@ def preview(request: PreviewRequest) -> PreviewResponse:
         moves = []
 
     plan_id = str(uuid4())
-    plans[plan_id] = StoredPlan(source=source, moves=moves, suggestions=suggestions)
+    plans[plan_id] = StoredPlan(source=source, moves=moves, suggestions=suggestions,
+                              analysis_stats=dict(analysis_stats), scan_summary={
+        "files_seen": scan_summary.files_seen, "skipped": scan_summary.skipped,
+        "reasons": scan_summary.reasons, "truncated": scan_summary.truncated,
+    })
     return PreviewResponse(
         plan_id=plan_id,
         source=str(source),
@@ -532,6 +553,106 @@ def preview(request: PreviewRequest) -> PreviewResponse:
             for index, move in enumerate(moves)
         ],
     )
+
+
+@app.post("/api/chat")
+def chat(request: ChatRequest) -> dict:
+    plan = plans.get(request.plan_id)
+    if plan is None:
+        raise HTTPException(404, "Preview expired. Create a new preview before chatting.")
+    if not request.message.strip():
+        raise HTTPException(422, "Enter a message.")
+    # Serialize chat and Apply for this preview; no partially edited plan is exposed.
+    with plan.lock:
+        if plan.attempted:
+            raise HTTPException(409, "Create a new preview before chatting about this folder.")
+        snapshot = StoredPlan(
+            source=plan.source, moves=deepcopy(plan.moves), suggestions=deepcopy(plan.suggestions),
+            chat_rules=list(plan.chat_rules), chat_messages=list(plan.chat_messages),
+            chat_decisions=dict(plan.chat_decisions), scan_summary=dict(plan.scan_summary),
+            analysis_stats=dict(plan.analysis_stats),
+        )
+        if len(snapshot.moves) != len(snapshot.suggestions):
+            raise HTTPException(409, "Create a new preview before chatting.")
+        if request.files is not None:
+            snapshot.moves = _apply_user_edits(snapshot, ApplyRequest(
+                plan_id=request.plan_id, files=request.files,
+            ))
+        _validate_for_apply(snapshot)
+        context = chat_engine.context_for(snapshot)
+        # Bound requests before sending metadata to a provider.
+        if len(json.dumps(context)) > 180000:
+            raise HTTPException(400, "Choose a smaller folder for chat refinement.")
+        try:
+            models = provider_store.activate_runtime() or resolve_models(None)
+            user_message = {"role": "user", "content": chat_engine.redact_sensitive(request.message)}
+            result = chat_engine.call_json(models, [
+                {"role": "system", "content": chat_engine.SYSTEM_PROMPT},
+                *snapshot.chat_messages[-12:],
+                {"role": "user", "content": json.dumps({"context": context,
+                                                         "message": user_message["content"]})},
+            ], chat_engine.ChatResult)
+            response_preview = None
+            if result.rules:
+                moves, suggestions, conflict, affected, decisions = chat_engine.refine(
+                    snapshot, result, context, models,
+                )
+                notes = []
+                if not affected:
+                    notes.append("No files in this preview matched those rules")
+                elif conflict:
+                    notes.append("Your newer instruction replaces an earlier instruction for the same files")
+                if any(item.sensitive for item in suggestions):
+                    notes.append("sensitive files were left unchanged")
+                if notes:
+                    result.reply = "; ".join(notes) + ". Review the preview before confirming."
+                # Resolve collisions and validate destinations before storing the new preview.
+                taken: set[str] = set()
+                for move in moves:
+                    if move.selected:
+                        if Path(move.dest).resolve() == Path(move.src).resolve():
+                            move.selected = False
+                        else:
+                            move.dest = str(_unique_destination(Path(move.dest), taken))
+                new_id = str(uuid4())
+                new_plan = StoredPlan(
+                    source=plan.source, moves=moves, suggestions=suggestions,
+                    chat_rules=[*snapshot.chat_rules, *result.rules], chat_decisions=decisions,
+                    scan_summary=dict(plan.scan_summary),
+                    analysis_stats=dict(plan.analysis_stats),
+                )
+                _validate_for_apply(new_plan)
+                sanity = evaluate_plan(suggestions)
+                response_preview = PreviewResponse(
+                    plan_id=new_id, source=str(plan.source), analysis_seconds=0,
+                    scan_summary=dict(plan.scan_summary),
+                    analysis_stats=dict(plan.analysis_stats),
+                    plan_warnings=list(sanity.warnings), requires_confirmation=sanity.requires_confirmation,
+                    files=[PlanItem(
+                        id=str(index), name=Path(move.src).name,
+                        current_path=str(Path(move.src).parent), destination_name=Path(move.dest).name,
+                        target_path=_target_path(move), reasoning=move.reason,
+                        renamed=Path(move.src).name != Path(move.dest).name, selected=move.selected,
+                        category=suggestion.target_path, confidence=suggestion.confidence,
+                        evidence_excerpt=suggestion.evidence_excerpt, evidence_sources=suggestion.evidence_sources,
+                        warnings=suggestion.warnings, filename_conflict=suggestion.filename_conflict,
+                        evidence_sufficient=suggestion.sufficient_for_change,
+                        detected_type=suggestion.detected_type, extraction_status=suggestion.extraction_status,
+                        rename_reason=suggestion.rename_reason, sensitive=suggestion.sensitive,
+                    ) for index, (move, suggestion) in enumerate(zip(moves, suggestions))],
+                )
+                plans[new_id] = new_plan
+                destination_plan = new_plan
+            else:
+                destination_plan = plan
+            destination_plan.chat_messages = [
+                *snapshot.chat_messages[-10:], user_message,
+                {"role": "assistant", "content": result.model_dump_json()},
+            ]
+            return {"result": result.model_dump(),
+                    "preview": response_preview.model_dump() if response_preview else None}
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(502, "Chat could not prepare a valid preview. Check Providers and try again.") from error
 
 
 def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:

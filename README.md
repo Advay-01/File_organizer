@@ -54,6 +54,31 @@ Pick models with `-m` (repeat for fallbacks) or `ORGANIZER_MODELS` in `.env`:
 `gemini/gemini-2.5-flash`, `ollama/llama3.2`, `openai/<model>`, `deepseek/deepseek-chat`.
 Default: Gemini first, local Ollama as fallback.
 
+### Refine a preview with chat
+
+After **Analyze folder**, use **Refine with chat** to ask questions or give optional
+instructions such as “Put DSA notes and LeetCode solutions together” or “Leave
+Projects alone”. Chat uses the models configured in **Providers**, including their
+fallback order. It sends non-sensitive filenames, folder counts, proposed categories,
+and short redacted evidence excerpts; sensitive files are omitted from model context
+and chat rules leave them unchanged. Chat does not create permission-protected folders.
+
+The local `POST /api/chat` endpoint accepts `plan_id`, `message`, and optional current
+per-file review decisions (`files`, with the same shape as Apply). The model returns
+`ChatResult`: `reply`, `rules`, and `needs_clarification`. Each rule matches exactly
+one topic, extension, or relative glob and either moves matching files to a validated
+one- or two-level folder or excludes them. Questions and clarification return no rules.
+Topic matches are resolved against known non-sensitive file IDs; paths and extension/
+glob matches are checked locally. Newer instructions override earlier rules for the
+same files and conflicts are reported in the reply.
+
+The response contains `result` and an optional revised `preview`. Review that preview,
+then choose **Review & organize** and **Confirm moves**. Chat never executes moves;
+Apply uses the stored plan and existing safety checks and undo support. Chat rules
+and conversation context belong to the current preview session and are cleared on
+a fresh scan or service restart. Chat refinement is limited to files included in
+the preview, so enable **Include subfolders** before analyzing nested files.
+
 ### Tauri 2 desktop app
 
 The Windows desktop shell launches the bundled Python API on a dynamically selected

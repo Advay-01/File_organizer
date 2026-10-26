@@ -294,7 +294,10 @@ def extract_evidence(
     )
     if status == "unavailable":
         warnings.append("No reliable content or metadata could be extracted.")
-    sensitivity_text = _read_text(path, max_chars) or content
+    # PDF object offsets, font tables, and other container bytes are not
+    # document content. Their numeric IDs can accidentally pass a card checksum.
+    # Keep the larger raw-text scan for genuine text files (including .env).
+    sensitivity_text = content if signature_type != "unknown" else (_read_text(path, max_chars) or content)
     findings = detect_sensitive(
         sensitivity_text,
         [

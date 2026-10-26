@@ -19,7 +19,15 @@ class SensitiveFinding:
 
 AADHAAR_PATTERN = re.compile(r"(?<!\d)([2-9]\d{3}[ -]?\d{4}[ -]?\d{4})(?!\d)")
 PAN_PATTERN = re.compile(r"(?<![A-Z0-9])[A-Z]{5}\d{4}[A-Z](?![A-Z0-9])")
-CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+# A decimal's fractional digits can coincidentally pass Luhn (for example
+# e = 2.7182818284590452). Only match standalone numeric tokens, never part
+# of a decimal, scientific notation, or an alphanumeric identifier.
+CARD_CANDIDATE = re.compile(r"(?<![\w.])\d(?:[ -]?\d){12,18}(?!\w|\.\d)")
+CARD_CONTEXT = re.compile(
+    r"\b(?:credit card|debit card|payment card|card number|card details|cardholder|cvv|visa|mastercard|amex)\b"
+    r"|\bcard\s*[:#=]?\s*\(?\s*\d",
+    re.I,
+)
 API_KEY_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
@@ -42,6 +50,16 @@ SENSITIVE_FILENAME = re.compile(
 FINANCIAL_TERMS = (
     "invoice", "receipt", "amount due", "tax invoice", "bank account",
     "account number", "payment", "balance", "transaction", "salary slip",
+)
+PERSONAL_FINANCIAL_LABELS = (
+    "bank statement", "account holder", "statement period", "opening balance",
+    "closing balance", "salary slip", "net pay", "employee id",
+)
+FINANCIAL_IDENTIFIER = re.compile(
+    r"\b(?:account\s*(?:number|no\.?|#)|bank\s+account|routing\s*(?:number|no\.?)|iban|ifsc)"
+    r"\s*[:=#-]?\s*(?=[A-Z0-9* -]{4,40}(?:\b|$))"
+    r"[A-Z* -]*\d[A-Z0-9* -]{2,35}",
+    re.I,
 )
 
 
@@ -200,17 +218,11 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
             signals.append("tax identity context")
         findings.append(SensitiveFinding("likely_pan", tuple(signals)))
 
-    card_context = any(
-        term in lowered
-        for term in ("card number", "credit card", "debit card", "payment card", "cvv", "expires")
-    )
+    metadata_card_context = bool(CARD_CONTEXT.search(" ".join(metadata_values).replace("_", " ")))
     for match in CARD_CANDIDATE.finditer(haystack):
-        if luhn_valid(match.group(0)):
-            signals = ["Luhn valid"]
-            if card_context:
-                signals.append("payment-card context")
-            elif len(re.sub(r"\D", "", match.group(0))) >= 16:
-                signals.append("16+ digit number")
+        nearby = haystack[max(0, match.start() - 180):match.end() + 180]
+        if luhn_valid(match.group(0)) and (metadata_card_context or CARD_CONTEXT.search(nearby)):
+            signals = ["Luhn valid", "payment-card context"]
             findings.append(SensitiveFinding("likely_payment_card", tuple(signals)))
             break
 
@@ -227,12 +239,16 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
             SensitiveFinding("likely_credential_file", ("credential-like filename or context",))
         )
 
-    matches = sum(1 for term in FINANCIAL_TERMS if term in lowered)
-    if matches >= 2:
+    matches = sum(1 for term in FINANCIAL_TERMS if re.search(r"\b" + re.escape(term) + r"\b", lowered))
+    personal_labels = sum(1 for term in PERSONAL_FINANCIAL_LABELS if term in lowered)
+    # Project proposals and lectures often discuss payments, receipts, and
+    # balances. Require actual account details or multiple statement/payroll
+    # fields before withholding them from topic classification.
+    if FINANCIAL_IDENTIFIER.search(haystack) or (matches >= 2 and personal_labels >= 2):
         findings.append(
             SensitiveFinding(
                 "likely_financial_document",
-                (f"{matches} financial terms",),
+                ("personal account or statement details",),
             )
         )
     return findings

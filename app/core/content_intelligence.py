@@ -48,6 +48,7 @@ Return ONLY JSON:
 "suggested_name":"Descriptive_Name.ext or empty",
 "name_evidence":"exact phrase from evidence supporting the name, or empty"}]}
 Rules:
+- Use only the JSON keys shown above. Put classification evidence in evidence_quote.
 - category must be a broad subject; subcategory should be reusable and concise.
 - reuse a folder from existing_folders (written Category/Subcategory, or one name) whenever it
   fits; never invent a near-duplicate of an existing name (for example Technology when Software

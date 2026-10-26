@@ -32,6 +32,7 @@ import {
 import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 import HistoryPanel from "./components/HistoryPanel";
 import ProviderStudio from "./components/ProviderStudio";
+import ChatPanel, { type ChatResult } from "./components/ChatPanel";
 import { Button } from "./components/ui/button";
 import sortlyMark from "./assets/sortly-mark.svg";
 import { ApiError, fetchJson } from "./lib/api";
@@ -173,7 +174,7 @@ export default function App() {
   const [allowSensitiveCloud, setAllowSensitiveCloud] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [fileEdits, setFileEdits] = useState<Record<string, FileEdit>>({});
-  const [busy, setBusy] = useState<"preview" | "apply" | "undo" | null>(null);
+  const [busy, setBusy] = useState<"preview" | "apply" | "undo" | "chat" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -388,6 +389,30 @@ export default function App() {
     }
   }
 
+  async function sendChat(message: string): Promise<ChatResult> {
+    if (!preview || busy || !apiReady) throw new Error("Create a preview before chatting.");
+    setBusy("chat");
+    try {
+      const response = await request<{ result: ChatResult; preview: Preview | null }>(apiBase, "/api/chat", {
+        plan_id: preview.plan_id, message,
+        files: Object.entries(fileEdits).map(([id, edit]) => ({ id, ...edit })),
+      });
+      if (response.preview) {
+        const next = response.preview;
+        setPreview(next);
+        setFileEdits(Object.fromEntries(next.files.map((file) => [file.id, {
+          accepted: file.selected, target_path: file.target_path, destination_name: file.destination_name,
+        }])));
+        setRiskAcknowledged(false);
+        setConfirmOpen(false);
+        setMessage("Chat updated the preview. Review the changes before confirming moves.");
+      }
+      return response.result;
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function applyPlan() {
     if (!preview || !apiReady || invalidEditCount > 0 || (preview.requires_confirmation && !riskAcknowledged)) return;
     setConfirmOpen(false);
@@ -577,13 +602,14 @@ export default function App() {
                 <HardDrive size={17} className="shrink-0 text-ink-muted" />
                 <input
                   value={source}
+                  disabled={busy !== null}
                   onChange={(event) => { setSource(event.target.value); resetPreview(); }}
                   className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
                   placeholder={String.raw`C:\Users\you\Documents`}
                 />
                 <Button variant="secondary" size="sm" className="source-browse-button" onClick={chooseFolder} disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
               </div>
-              <fieldset className="organize-options">
+              <fieldset className="organize-options" disabled={busy !== null}>
                 <legend className="ui-eyebrow text-ink-muted">Organize options</legend>
                 <div className="organize-options-grid">
                   <OptionSwitch label="Include subfolders" checked={recursive} onChange={(checked) => { setRecursive(checked); resetPreview(); }} />
@@ -651,6 +677,10 @@ export default function App() {
 
             {preview && <PreviewSummary preview={preview} stats={reviewStats} groupCount={groups.length} />}
 
+            {preview && preview.files.length > 0 && <ChatPanel
+              disabled={busy !== null || !apiReady} busy={busy === "chat"} onSend={sendChat}
+            />}
+
             <AnimatePresence>
               {completion && (
                 <CompletionSummary
@@ -671,6 +701,7 @@ export default function App() {
                   exit={reducedMotion ? undefined : { opacity: 0, y: -4 }}
                   transition={{ duration: reducedMotion ? 0 : 0.24, ease: "easeOut" }}
                   className="ui-panel review-shell mt-6 overflow-hidden"
+                  inert={busy === "chat"}
                   aria-labelledby="review-heading"
                 >
                   <div className="review-header">

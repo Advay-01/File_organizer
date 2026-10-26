@@ -66,6 +66,48 @@ class ModelFallbackTests(unittest.TestCase):
         self.assertEqual(raw, GOOD)
         self.assertEqual(calls, [MODELS[0]])
 
+    def test_model_added_evidence_does_not_reject_a_valid_reply(self):
+        payload = json.loads(GOOD)
+        payload['files'][0]['subcategory_evidence'] = ''
+        payload['files'][0]['extra_explanation'] = 'Optional provider commentary'
+        payload['summary'] = 'One file classified'
+        reply = json.dumps(payload)
+        raw, calls = self.run_call({MODELS[0]: reply, MODELS[1]: 'never called'})
+        parsed = ci._parse_response(raw, {0})
+        self.assertEqual(calls, [MODELS[0]])
+        self.assertEqual(parsed[0]['subcategory'], 'Lecture Notes')
+        self.assertNotIn('subcategory_evidence', parsed[0])
+        self.assertNotIn('extra_explanation', parsed[0])
+
+    def test_annotations_do_not_hide_invalid_decision_fields(self):
+        for changes in (
+            {'confidence': 'certain'},
+            {'category': ''},
+            {'id': 99},
+        ):
+            payload = json.loads(GOOD)
+            payload['files'][0].update(changes, subcategory_evidence='')
+            with self.subTest(changes=changes):
+                raw, calls = self.run_call({MODELS[0]: json.dumps(payload), MODELS[1]: GOOD})
+                self.assertEqual(raw, GOOD)
+                self.assertEqual(calls, MODELS)
+
+    def test_missing_required_field_with_annotations_is_still_rejected(self):
+        payload = json.loads(GOOD)
+        del payload['files'][0]['subcategory']
+        payload['files'][0]['subcategory_evidence'] = ''
+        raw, calls = self.run_call({MODELS[0]: json.dumps(payload), MODELS[1]: GOOD})
+        self.assertEqual(raw, GOOD)
+        self.assertEqual(calls, MODELS)
+
+    def test_duplicate_ids_with_annotations_are_still_rejected(self):
+        payload = json.loads(GOOD)
+        payload['files'][0]['subcategory_evidence'] = ''
+        payload['files'].append(dict(payload['files'][0]))
+        raw, calls = self.run_call({MODELS[0]: json.dumps(payload), MODELS[1]: GOOD})
+        self.assertEqual(raw, GOOD)
+        self.assertEqual(calls, MODELS)
+
     def test_transport_error_still_falls_back(self):
         raw, calls = self.run_call({
             MODELS[0]: llm_http.LLMHTTPError("anthropic HTTP 529", 529),
