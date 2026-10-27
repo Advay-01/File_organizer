@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from app.core import safety
+from app import api
 
 
 def test_native_move_never_overwrites_an_existing_file(tmp_path):
@@ -53,6 +54,8 @@ def test_system_ancestor_alias_resolves_to_the_same_approved_directory(tmp_path)
     source = alias / 'work/source.txt'
     source.write_text('original', encoding='utf-8')
     safety.validate_move_paths(source, alias / 'work/Docs/Notes/source.txt', root)
+    tree = api._hierarchy(alias / 'work', [{'dest': str(root / 'Docs/Notes/source.txt')}])
+    assert tree['folders'][0]['name'] == 'Docs'
     nested = root / 'redirect'
     nested.symlink_to(root, target_is_directory=True)
     with pytest.raises(safety.UnsafePathError):

@@ -284,6 +284,7 @@ def _validate_for_apply(plan: StoredPlan) -> None:
 
 
 def _hierarchy(root: Path, moves: List[dict]) -> dict:
+    root = root.resolve()
     tree = {"name": root.name or str(root), "files": [], "folders": {}}
     for move in moves:
         destination = Path(move["dest"]).resolve()

@@ -159,7 +159,7 @@ def _moves(entry: dict, output_root: str | None = None) -> List[dict]:
 
 def _folder_of(dest: str, output_root: str) -> str:
     try:
-        return Path(dest).parent.relative_to(output_root).as_posix() or "."
+        return Path(dest).parent.resolve().relative_to(Path(output_root).resolve()).as_posix() or "."
     except ValueError:
         return Path(dest).parent.name or "."
 
