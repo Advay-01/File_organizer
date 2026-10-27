@@ -66,6 +66,7 @@ This release brings the chat and privacy branch into the desktop release, replac
 - 259 backend tests and 48 subtests passed, including reruns, collision handling, privacy, chat schema repair, and Apply/Undo safety.
 - 21 frontend unit tests and all 10 browser workflow scenarios passed. Browser regression requests use isolated fixtures.
 - Recorded a separate live-model demo: six sample files analyzed, DSA instructions applied, six moves confirmed, then Undo restored all six original content hashes.
+- Verified the rebuilt Windows payload: bundled API startup, privacy exclusion, one schema-repair retry, long-name shortening, no-op reruns, and Undo. The installer was extracted without replacing an existing installation; its desktop app passed real Tauri IPC, API health, empty-folder analysis, and Settings checks.
 
 ## 0.1.6 - 2026-10-25
 
