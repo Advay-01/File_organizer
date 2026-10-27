@@ -155,11 +155,13 @@ class ProviderStoreTests(unittest.TestCase):
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
         self.saved_environment = {
             name: os.environ.get(name) for name in (*KEY_ENV_VARS, "ORGANIZER_HOME")
         }
         for name in KEY_ENV_VARS:
             os.environ.pop(name, None)
+        os.environ["ORGANIZER_HOME"] = self.temp.name
 
     def tearDown(self):
         for name, value in self.saved_environment.items():
@@ -167,6 +169,7 @@ class DiscoveryTests(unittest.TestCase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+        self.temp.cleanup()
 
     @patch("app.core.provider_catalog._request_json")
     def test_openai_compatible_discovery(self, request):

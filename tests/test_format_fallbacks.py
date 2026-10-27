@@ -376,6 +376,56 @@ class ParserFallbackTests(unittest.TestCase):
         self.assertFalse(extract_evidence(file_info(source)).extension_mismatch)
         self.assertTrue(source.exists())
 
+    def test_chess_record_keeps_pgn_extension_and_is_not_a_config_file(self):
+        source = self.root / "chess_com_games_2026-10-17.pgn"
+        source.write_text(
+            '[Event "Casual Game"]\n[Site "Chess.com"]\n[Date "2026.10.17"]\n'
+            '[White "Alice"]\n[Black "Bob"]\n[Result "1-0"]\n\n'
+            '1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0\n', encoding="utf-8",
+        )
+        evidence = extract_evidence(file_info(source))
+        self.assertEqual(evidence.detected_type, ".pgn")
+        self.assertFalse(evidence.extension_mismatch)
+        self.assertFalse(any("conflicts with detected" in warning for warning in evidence.warnings))
+
+        cache = ContentIntelligenceCache(self.root / "chess-cache.db")
+        try:
+            result = plan_content_intelligence(
+                [file_info(source)], str(self.root), ["fake/model"], cache=cache,
+                completion_fn=completion_for(
+                    "Documents", "Chess Games", "Casual Game", "chess_games.txt",
+                    conflict="extension_mismatch",
+                ),
+            )
+        finally:
+            cache.close()
+        item = result.suggestions[0]
+        self.assertEqual(item.filename_conflict, "none")
+        self.assertTrue(item.suggested_name.endswith(".pgn"))
+
+    def test_patch_and_diff_keep_their_extensions(self):
+        content = (
+            "diff --git a/settings.ini b/settings.ini\n"
+            "--- a/settings.ini\n+++ b/settings.ini\n"
+            "@@ -1,2 +1,2 @@\n"
+            " [settings]\n-old=true\n+old=false\n"
+        )
+        for extension in (".patch", ".diff"):
+            with self.subTest(extension=extension):
+                source = self.root / f"fix-settings{extension}"
+                source.write_text(content, encoding="utf-8")
+                evidence = extract_evidence(file_info(source))
+                self.assertEqual(evidence.detected_type, ".patch")
+                self.assertFalse(evidence.extension_mismatch)
+
+    def test_generic_readable_text_does_not_prove_an_unknown_extension_is_wrong(self):
+        source = self.root / "field_notes.custom"
+        source.write_text("Unstructured field observations about plants and soil. " * 4, encoding="utf-8")
+        evidence = extract_evidence(file_info(source))
+        self.assertEqual(evidence.detected_type, "unknown")
+        self.assertFalse(evidence.extension_mismatch)
+        self.assertEqual(evidence.extraction_status, "sufficient")
+
     def test_sensitive_fallback_is_not_sent_to_cloud(self):
         source = self.root / "private.xml"
         source.write_text(

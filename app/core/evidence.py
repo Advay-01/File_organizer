@@ -133,6 +133,7 @@ def _extensions_match(extension: str, detected: str) -> bool:
         ".xlsm": ".xlsx",
         ".tgz": ".tar",
         ".htm": ".html",
+        ".diff": ".patch",
     }
     return aliases.get(extension, extension) == aliases.get(detected, detected)
 
@@ -255,6 +256,12 @@ def extract_evidence(
     warnings = []
     if extraction.warning:
         warnings.append(extraction.warning)
+    # Readable prose is not evidence that an unfamiliar text extension is wrong.
+    # A failed structured parser is different: its fallback can establish that
+    # the declared format (for example XLSX) is actually plain text.
+    if detected_type == ".txt" and extraction.parser_status == "sniffed_text":
+        detected_type = "unknown"
+        detection_confidence = "unknown"
     if detected_type != "unknown" and not _extensions_match(extension, detected_type):
         warnings.append(
             f"Extension {extension or '(none)'} conflicts with detected format {detected_type}."
@@ -294,7 +301,10 @@ def extract_evidence(
     )
     if status == "unavailable":
         warnings.append("No reliable content or metadata could be extracted.")
-    sensitivity_text = _read_text(path, max_chars) or content
+    # PDF object offsets, font tables, and other container bytes are not
+    # document content. Their numeric IDs can accidentally pass a card checksum.
+    # Keep the larger raw-text scan for genuine text files (including .env).
+    sensitivity_text = content if signature_type != "unknown" else (_read_text(path, max_chars) or content)
     findings = detect_sensitive(
         sensitivity_text,
         [

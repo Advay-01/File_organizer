@@ -81,6 +81,7 @@ class DesktopBuildWorkflowTests(unittest.TestCase):
                 r"dist\sortly-api",
                 r"dist\sortly-api-x86_64-pc-windows-msvc.exe",
                 r"src-tauri\binaries\sortly-api",
+                r"src-tauri\target\release\binaries\sortly-api",
                 r"src-tauri\target\release\bundle\nsis",
             ],
         )

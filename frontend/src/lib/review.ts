@@ -23,6 +23,16 @@ export type ReviewEdit = {
   destination_name: string;
 };
 
+export function getFilenameExtensionChange(original: string, proposed: string): { from: string; to: string } | null {
+  function extension(name: string): string {
+    const dot = name.lastIndexOf(".");
+    return dot > 0 && dot < name.length - 1 ? name.slice(dot) : "";
+  }
+  const from = extension(original);
+  const to = extension(proposed);
+  return from.toLowerCase() === to.toLowerCase() ? null : { from, to };
+}
+
 export type ReviewStats = {
   total: number;
   selected: number;
@@ -109,7 +119,7 @@ export function fileNeedsAttention(file: ReviewFile, edit?: ReviewEdit): boolean
     || file.confidence === "low"
     || file.confidence === "insufficient"
     || file.extraction_status !== "sufficient"
-    || file.filename_conflict !== "none"
+    || (file.filename_conflict !== "none" && file.filename_conflict !== "generic")
     || (current.accepted && (!current.target_path.trim() || !current.destination_name.trim()))
     || file.warnings.some((warning) => !DIAGNOSTIC_WARNING.test(warning))
   );
@@ -118,8 +128,8 @@ export function fileNeedsAttention(file: ReviewFile, edit?: ReviewEdit): boolean
 export function getFileReviewStatus(file: ReviewFile, edit?: ReviewEdit): ReviewFileStatus {
   const current = currentEdit(file, edit);
   if (fileHasSecurityConcern(file)) return "security";
-  if (fileNeedsAttention(file, current)) return "attention";
   if (!current.accepted) return "excluded";
+  if (fileNeedsAttention(file, current)) return "attention";
   return "ready";
 }
 
@@ -185,6 +195,7 @@ export function summarizeFileWarning(file: ReviewFile, edit?: ReviewEdit): strin
   if (fileHasSecurityConcern(file)) {
     return "Sensitive content needs your review before this file can be included.";
   }
+  if (!current.accepted) return "";
   if (current.accepted && (!current.target_path.trim() || !current.destination_name.trim())) {
     return "A destination or filename needs attention.";
   }

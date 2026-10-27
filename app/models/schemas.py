@@ -41,9 +41,12 @@ class OrganizerResponse(BaseModel):
 
 
 class ContentIntelligenceAction(BaseModel):
-    """Strict response item from the content-intelligence model."""
+    """Validated decision fields; ignore optional model-added annotations."""
 
-    model_config = ConfigDict(extra="forbid")
+    # Providers can add explanatory metadata such as subcategory_evidence.
+    # Only declared fields reach the planner; required fields and enums still
+    # validate normally, and file IDs are checked against the current batch.
+    model_config = ConfigDict(extra="ignore")
 
     id: int = Field(ge=0)
     category: str = Field(min_length=1, max_length=80)
@@ -57,6 +60,6 @@ class ContentIntelligenceAction(BaseModel):
 
 
 class ContentIntelligenceResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     files: List[ContentIntelligenceAction]

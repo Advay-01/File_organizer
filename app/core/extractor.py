@@ -31,6 +31,7 @@ TEXT_EXTS = {
     ".env", ".tf", ".hcl",
     ".py", ".java", ".c", ".cpp", ".h", ".js", ".ts", ".go", ".rs", ".html", ".css",
     ".sql", ".ipynb", ".tex", ".srt", ".vtt", ".svg", ".xml", ".sh", ".ps1",
+    ".pgn", ".patch", ".diff",
 }
 
 HTML_MARKER = re.compile(r"(?is)<!doctype\s+html\b|<html(?:\s|>)|<script(?:\s|>)|<body(?:\s|>)")
@@ -41,6 +42,11 @@ ENV_ASSIGNMENT = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(?:[^\s#]+|[^\r\n]+)"
 )
 INI_SECTION = re.compile(r"(?m)^[ \t]*\[[^\]\r\n]+\][ \t]*\r?$")
+PGN_TAG = re.compile(r'(?m)^\[(?:Event|Site|Date|Round|White|Black|Result|FEN|SetUp)\s+"[^"\r\n]*"\]\s*$')
+PGN_MOVES = re.compile(r"(?m)(?:^|\s)\d+\s*\.(?:\.\.)?\s*(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8]|O-O)")
+PATCH_HEADER = re.compile(r"(?m)^diff --git a/[^\r\n]+ b/[^\r\n]+\s*$")
+PATCH_PAIR = re.compile(r"(?m)^--- (?:a/[^\r\n]+|/dev/null)\r?\n\+\+\+ (?:b/[^\r\n]+|/dev/null)\s*$")
+PATCH_HUNK = re.compile(r"(?m)^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 TOML_TABLE = re.compile(r"(?m)^[ \t]*\[\[?[A-Za-z0-9_.\"-]+\]?\][ \t]*\r?$")
 TOML_TYPED_VALUE = re.compile(
     r"(?m)^[ \t]*[A-Za-z0-9_.\"-]+[ \t]*=[ \t]*"
@@ -168,6 +174,10 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
     if not value:
         return FormatDetection()
 
+    if len(PGN_TAG.findall(value)) >= 2 and PGN_MOVES.search(value):
+        return FormatDetection(".pgn", "high", ("PGN game tags and chess moves",))
+    if (PATCH_HEADER.search(value) or PATCH_PAIR.search(value)) and PATCH_HUNK.search(value):
+        return FormatDetection(".patch", "high", ("unified diff header and hunk",))
     if SHEBANG_MARKER.search(value):
         return FormatDetection(".sh", "high", ("shell shebang",))
     if PRIVATE_KEY_MARKER.search(value):

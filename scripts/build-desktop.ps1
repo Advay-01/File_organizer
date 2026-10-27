@@ -67,6 +67,7 @@ Remove-GeneratedPath (Join-Path $projectRoot "build\sortly-sidecar")
 Remove-GeneratedPath (Join-Path $projectRoot "dist\sortly-api")
 Remove-GeneratedPath (Join-Path $projectRoot "dist\sortly-api-x86_64-pc-windows-msvc.exe")
 Remove-GeneratedPath (Join-Path $projectRoot "src-tauri\binaries\sortly-api")
+Remove-GeneratedPath (Join-Path $projectRoot "src-tauri\target\release\binaries\sortly-api")
 Remove-GeneratedPath (Join-Path $projectRoot "src-tauri\target\release\bundle\nsis")
 
 Write-Output "Building the Python sidecar from source..."

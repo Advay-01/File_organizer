@@ -45,3 +45,15 @@ test("network failures explain the uncertain Apply outcome", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("an explicitly cancelled analysis retains its abort outcome", async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  const aborted = new DOMException("Analysis cancelled", "AbortError");
+  controller.abort();
+  globalThis.fetch = async () => { throw aborted; };
+  try {
+    await assert.rejects(fetchJson("http://127.0.0.1:9/api/preview", { method: "POST", signal: controller.signal }, "Analysis failed."),
+      (error: unknown) => error === aborted);
+  } finally { globalThis.fetch = originalFetch; }
+});

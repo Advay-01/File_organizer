@@ -1,13 +1,11 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   AlertTriangle,
   ArrowRight,
   Check,
   ChevronDown,
-  ChevronRight,
   ExternalLink,
   FileText,
   Folder,
@@ -20,18 +18,18 @@ import {
   LockKeyhole,
   Monitor,
   Moon,
-  Plug,
   RotateCcw,
   Search,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Sun,
   X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import HistoryPanel from "./components/HistoryPanel";
 import ProviderStudio from "./components/ProviderStudio";
+import ChatPanel, { type ChatResult } from "./components/ChatPanel";
+import AnalysisActivity from "./components/AnalysisActivity";
 import { Button } from "./components/ui/button";
 import sortlyMark from "./assets/sortly-mark.svg";
 import { ApiError, fetchJson } from "./lib/api";
@@ -39,6 +37,7 @@ import {
   describeSkips,
   filterReviewGroups,
   getFileReviewStatus,
+  getFilenameExtensionChange,
   getInitialGroupLimit,
   getReviewBatchMode,
   shouldExpandGroupsInitially,
@@ -52,43 +51,25 @@ import {
   type ReviewStats,
 } from "./lib/review";
 import { describeUndoResult, type UndoResult } from "./lib/undo";
+import { applyInstructions, nextClarification, type ChatMessage } from "./lib/workspace";
 
 const BROWSER_API = import.meta.env.VITE_SORTLY_API ?? "http://127.0.0.1:8765";
 const DESKTOP = isTauri();
 const THEME_STORAGE_KEY = "sortly.theme";
 
-type WorkspaceView = "organize" | "history" | "providers" | "settings";
+type WorkspaceView = "organize" | "preview" | "settings" | "providers" | "history";
 type ThemePreference = "system" | "light" | "dark";
-
-const VIEW_META: Record<WorkspaceView, { label: string; description: string }> = {
-  organize: {
-    label: "Organize",
-    description: "Scan, review, and move files with an explicit plan.",
-  },
-  history: {
-    label: "History",
-    description: "Review previous runs and reverse changes safely.",
-  },
-  providers: {
-    label: "Providers",
-    description: "Choose the models and endpoints used for analysis.",
-  },
-  settings: {
-    label: "Settings",
-    description: "Control how Sortly looks on this device.",
-  },
-};
-
-const NAV_ITEMS = [
-  { id: "organize", label: "Organize", icon: FolderSearch },
-  { id: "history", label: "History", icon: HistoryIcon },
-  { id: "providers", label: "Providers", icon: Plug },
-  { id: "settings", label: "Settings", icon: Settings2 },
-] as const satisfies ReadonlyArray<{ id: WorkspaceView; label: string; icon: typeof FolderSearch }>;
-
+const VIEW_LABELS: Record<WorkspaceView, string> = { organize: "Organize", preview: "Preview", settings: "Settings", providers: "Providers", history: "History" };
 function workspaceViewFromHash(): WorkspaceView {
   const route = window.location.hash.replace(/^#\/?/, "").split("/")[0];
-  return route === "history" || route === "providers" || route === "settings" ? route : "organize";
+  if (route === "providers") return "providers";
+  if (route === "history") return "history";
+  if (route === "settings") return "settings";
+  return route === "preview" ? "preview" : "organize";
+}
+
+function folderIdentity(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 function readThemePreference(): ThemePreference {
@@ -156,9 +137,10 @@ type ApiRuntime = {
   detail?: string | null;
 };
 
-async function request<T>(apiBase: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(apiBase: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   if (!apiBase) throw new Error("The local Sortly service is not ready yet.");
   return fetchJson<T>(`${apiBase}${path}`, {
+    signal,
     method: body === undefined ? "GET" : "POST",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -173,7 +155,7 @@ export default function App() {
   const [allowSensitiveCloud, setAllowSensitiveCloud] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [fileEdits, setFileEdits] = useState<Record<string, FileEdit>>({});
-  const [busy, setBusy] = useState<"preview" | "apply" | "undo" | null>(null);
+  const [busy, setBusy] = useState<"preview" | "apply" | "undo" | "chat" | "browse" | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -186,7 +168,17 @@ export default function App() {
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [visibleGroupLimit, setVisibleGroupLimit] = useState(Number.POSITIVE_INFINITY);
-  const reducedMotion = useReducedMotion();
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatError, setChatError] = useState("");
+  const [clarification, setClarification] = useState<string | null>(null);
+  const [settingsVisited, setSettingsVisited] = useState(activeView === "settings");
+  const [showProviders, setShowProviders] = useState(activeView === "providers");
+  const [showHistory, setShowHistory] = useState(activeView === "history");
+  const analysisController = useRef<AbortController | null>(null);
+  const conversationFolder = useRef("");
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
+
   const [apiRuntime, setApiRuntime] = useState<ApiRuntime>(() => ({
     state: DESKTOP ? "starting" : "ready",
     base_url: DESKTOP ? null : BROWSER_API,
@@ -195,21 +187,27 @@ export default function App() {
   const apiReady = apiRuntime.state === "ready" && Boolean(apiBase);
 
   useEffect(() => {
-    const syncRoute = () => setActiveView(workspaceViewFromHash());
-    if (!/^#\/(organize|history|providers|settings)(?:\/|$)/.test(window.location.hash)) {
-      window.history.replaceState({ view: "organize" }, "", "#/organize");
-    }
+    const syncRoute = () => {
+      const next = workspaceViewFromHash();
+      const view = next;
+      if (view === "settings") setSettingsVisited(true);
+      if (view === "providers") setShowProviders(true);
+      if (view === "history") setShowHistory(true);
+      setActiveView(view);
+    };
+    syncRoute();
     window.addEventListener("popstate", syncRoute);
     window.addEventListener("hashchange", syncRoute);
     return () => {
       window.removeEventListener("popstate", syncRoute);
       window.removeEventListener("hashchange", syncRoute);
+      analysisController.current?.abort();
     };
   }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themePreference;
-    document.title = `${VIEW_META[activeView].label} · Sortly`;
+    document.title = `${VIEW_LABELS[activeView]} · Sortly`;
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
     } catch {
@@ -221,7 +219,19 @@ export default function App() {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [activeView]);
 
+  useEffect(() => {
+    if (activeView !== "preview" || !preview) return;
+    const frame = window.requestAnimationFrame(() => {
+      reviewHeading.current?.scrollIntoView({ block: "start", behavior: "auto" });
+      reviewHeading.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeView, preview?.plan_id]);
+
   function navigateTo(view: WorkspaceView) {
+    if (view === "settings") setSettingsVisited(true);
+    if (view === "providers") setShowProviders(true);
+    if (view === "history") setShowHistory(true);
     if (view === activeView) {
       if (window.location.hash !== `#/${view}`) window.history.replaceState({ view }, "", `#/${view}`);
       return;
@@ -282,6 +292,9 @@ export default function App() {
       return accepted && (!destination.trim() || !filename.trim());
     }).length;
   }, [fileEdits, preview]);
+  const extensionChangeCount = useMemo(() => (preview?.files ?? []).filter((file) =>
+    (fileEdits[file.id]?.accepted ?? file.selected) && getFilenameExtensionChange(file.name, file.destination_name)
+  ).length, [fileEdits, preview]);
   const reviewStats = useMemo(
     () => summarizeReview(preview?.files ?? [], fileEdits),
     [fileEdits, preview],
@@ -327,6 +340,8 @@ export default function App() {
 
   function resetPreview() {
     setPreview(null);
+    setClarification(null);
+    setConfirmOpen(false);
     setFileEdits({});
     setRiskAcknowledged(false);
     setReviewQuery("");
@@ -335,7 +350,27 @@ export default function App() {
     setVisibleGroupLimit(Number.POSITIVE_INFINITY);
   }
 
+  function changeSource(next: string, commit = false) {
+    if (folderIdentity(next) !== folderIdentity(source)) {
+      if (conversationFolder.current && conversationFolder.current !== folderIdentity(next)) {
+        setChatMessages([]);
+        setChatDraft("");
+        setChatError("");
+        conversationFolder.current = folderIdentity(next);
+      }
+      setCompletion(null);
+      setUndoAvailable(false);
+      setMessage("");
+      setError("");
+    }
+    if (commit) conversationFolder.current = folderIdentity(next);
+    setSource(next);
+    resetPreview();
+  }
+
   async function chooseFolder() {
+    if (busy) return;
+    setBusy("browse");
     setError("");
     try {
       if (DESKTOP) {
@@ -345,51 +380,122 @@ export default function App() {
           title: "Choose a folder to organize",
         });
         if (typeof selected !== "string") return;
-        setSource(selected);
+        changeSource(selected, true);
       } else {
         const result = await request<{ source: string }>(apiBase, "/api/choose-folder", {});
-        setSource(result.source);
+        changeSource(result.source, true);
       }
-      resetPreview();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Folder picker unavailable.";
       if (message !== "No folder was selected.") setError(message);
-    }
+    } finally { setBusy(null); }
+  }
+
+  function publishPreview(next: Preview) {
+    conversationFolder.current = folderIdentity(next.source);
+    setPreview(next);
+    setSource(next.source);
+    setFileEdits(Object.fromEntries(next.files.map((file) => [file.id, {
+      accepted: file.selected, target_path: file.target_path, destination_name: file.destination_name,
+    }])));
+    setRiskAcknowledged(false);
+    setConfirmOpen(false);
+  }
+
+  function recordChatReply(user: ChatMessage, result: ChatResult) {
+    setChatMessages((current) => [...current.map((item) => item.id === user.id
+      ? { ...item, status: "sent" as const, instruction: result.rules.length > 0 || Boolean(result.needs_clarification) }
+      : item), {
+      id: crypto.randomUUID(), role: "assistant", rules: result.rules,
+      text: [...new Set([result.reply, result.needs_clarification].filter(Boolean))].join(" "),
+    }]);
+  }
+
+  function cancelAnalysis() {
+    analysisController.current?.abort();
+    analysisController.current = null;
+    setBusy(null);
+    setChatMessages((current) => current.map((item) => item.status === "sending" ? { ...item, status: "queued" } : item));
+    setMessage("Analysis cancelled.");
   }
 
   async function createPreview() {
-    if (!source.trim() || !apiReady) return;
-    setBusy("preview");
-    setError("");
-    setMessage("");
+    if (!source.trim() || !apiReady || busy || analysisController.current) return;
+    conversationFolder.current = folderIdentity(source);
+    const controller = new AbortController();
+    analysisController.current = controller;
+    let messages = chatMessages;
+    if (chatDraft.trim()) {
+      const user: ChatMessage = { id: crypto.randomUUID(), role: "user", text: chatDraft.trim(), status: "queued", instruction: true };
+      messages = [...messages, user];
+      setChatMessages(messages);
+      setChatDraft("");
+    }
+    setBusy("preview"); setError(""); setMessage(""); setChatError("");
     resetPreview();
+    setCompletion(null);
     try {
-      const result = await request<Preview>(apiBase, "/api/preview", {
-        source,
-        recursive,
-        rename,
-        reorganize,
-        allow_sensitive_cloud: allowSensitiveCloud,
-      });
-      setPreview(result);
-      setSource(result.source);
-      setFileEdits(Object.fromEntries(result.files.map((file) => [file.id, {
-        accepted: file.selected,
-        target_path: file.target_path,
-        destination_name: file.destination_name,
-      }])));
-      setCompletion(null);
-      const cached = result.already_organized ? ` · ${result.already_organized} already organized skipped` : "";
-      setMessage(result.files.length ? `Preview ready · ${result.files.length} files · ${result.analysis_seconds}s${cached}` : result.already_organized ? `${result.already_organized} files are already organized.` : "No eligible files found.");
+      const original = await request<Preview>(apiBase, "/api/preview", {
+        source, recursive, rename, reorganize, allow_sensitive_cloud: allowSensitiveCloud,
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      let result = original;
+      let question: string | null = null;
+      if (original.files.length > 0) {
+        setChatMessages((current) => current.map((item) => item.role === "user" && item.instruction !== false
+          ? { ...item, status: "sending" } : item));
+        const refined = await applyInstructions(original, messages,
+          (planId, text) => request<{ result: ChatResult; preview: Preview | null }>(apiBase, "/api/chat", {
+            plan_id: planId, message: text,
+          }, controller.signal), recordChatReply, controller.signal);
+        result = refined.preview;
+        question = refined.clarification;
+      }
+      if (controller.signal.aborted) return;
+      publishPreview(result);
+      setClarification(question);
+      navigateTo("preview");
+      setMessage(result.files.length ? "Preview ready. Review the plan before confirming." : "No eligible files found.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not preview this folder.");
+      if (!controller.signal.aborted) {
+        setError(caught instanceof Error ? caught.message : "Could not preview this folder.");
+        setChatMessages((current) => current.map((item) => item.status === "sending" ? { ...item, status: "queued" } : item));
+      }
     } finally {
-      setBusy(null);
+      if (analysisController.current === controller) { analysisController.current = null; setBusy(null); }
     }
   }
 
+  async function sendChat() {
+    const text = chatDraft.trim();
+    if (!text || busy || analysisController.current) return;
+    if (source.trim()) conversationFolder.current = folderIdentity(source);
+    const user: ChatMessage = { id: crypto.randomUUID(), role: "user", text, status: preview ? "sending" : "queued", instruction: true };
+    setChatError("");
+    setChatMessages((current) => [...current, user]);
+    if (!preview) { setChatDraft(""); return; }
+    setBusy("chat");
+    try {
+      const response = await request<{ result: ChatResult; preview: Preview | null }>(apiBase, "/api/chat", {
+        plan_id: preview.plan_id, message: text,
+        files: Object.entries(fileEdits).map(([id, edit]) => ({ id, ...edit })),
+      });
+      recordChatReply(user, response.result);
+      setChatDraft("");
+      setClarification((current) => nextClarification(current, response.result));
+      if (response.preview) {
+        publishPreview(response.preview);
+        navigateTo("preview");
+        setMessage("Preview updated. Review the changes before confirming.");
+      }
+    } catch (caught) {
+      setChatError(caught instanceof Error ? caught.message : "Chat is unavailable. Try again.");
+      setChatMessages((current) => current.map((item) => item.id === user.id ? { ...item, status: "failed", instruction: false } : item));
+    } finally { setBusy(null); }
+  }
+
   async function applyPlan() {
-    if (!preview || !apiReady || invalidEditCount > 0 || (preview.requires_confirmation && !riskAcknowledged)) return;
+    if (!preview || !apiReady || busy || clarification || invalidEditCount > 0 || (preview.requires_confirmation && !riskAcknowledged)) return;
     setConfirmOpen(false);
     setBusy("apply");
     setError("");
@@ -503,180 +609,82 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen text-ink">
-      <aside className="ui-sidebar app-sidebar fixed inset-y-0 left-0 z-40 flex flex-col border-r px-3 py-4">
-        <div className="mb-7 flex items-center gap-3 px-2">
-          <div className="app-brand-mark shrink-0">
-            <img src={sortlyMark} alt="" width="40" height="40" />
-          </div>
-          <div className="min-w-0">
-            <div className="font-display text-[17px] font-semibold leading-none tracking-[-0.02em]">sortly</div>
-            <div className="ui-eyebrow mt-1.5 text-ink-muted">File intelligence</div>
-          </div>
-        </div>
-
-        <nav aria-label="Primary navigation" className="space-y-1">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const active = activeView === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className="app-nav-item"
-                data-active={active}
-                aria-current={active ? "page" : undefined}
-                onClick={() => navigateTo(item.id)}
-              >
-                <span className="app-nav-indicator" aria-hidden="true" />
-                <Icon size={17} strokeWidth={1.8} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+    <div className="sortly-workspace min-h-screen text-ink">
+      <header className="sortly-header">
+        <button type="button" className="sortly-home" aria-label="Sortly home" onClick={() => navigateTo("organize")}>
+          <img src={sortlyMark} alt="" width="42" height="42" />
+          <span className="font-display font-semibold">Sortly</span>
+        </button>
+        <nav className="sortly-tabs" aria-label="Workspace">
+          <button type="button" data-active={activeView === "preview" || activeView === "organize"}
+            aria-current={activeView === "preview" || activeView === "organize" ? "page" : undefined} onClick={() => navigateTo("preview")}>Preview</button>
+          <button type="button" data-active={activeView === "settings"}
+            aria-current={activeView === "settings" ? "page" : undefined} onClick={() => navigateTo("settings")}>Settings</button>
+          <button type="button" data-active={activeView === "providers"}
+            aria-current={activeView === "providers" ? "page" : undefined} onClick={() => navigateTo("providers")}>Providers</button>
+          <button type="button" data-active={activeView === "history"}
+            aria-current={activeView === "history" ? "page" : undefined} onClick={() => navigateTo("history")}>History</button>
         </nav>
+      </header>
+      <main className="sortly-main">
+        <section className="sortly-start" hidden={activeView !== "organize" && activeView !== "preview"} aria-label="Analyze a folder">
+          <div className="sortly-folder-row">
+            <div className="ui-input-shell source-folder-control flex items-center gap-3">
+              <HardDrive size={17} className="shrink-0 text-ink-muted" />
+              <input aria-label="Folder directory" value={source} disabled={busy !== null}
+                onChange={(event) => changeSource(event.target.value)}
+                className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
+                placeholder="Folder directory" />
+              <Button variant="secondary" size="sm" className="source-browse-button" onClick={chooseFolder}
+                disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
+            </div>
+            <Button className="sortly-analyze-button" aria-label={busy === "preview" ? "Cancel analysis" : "Analyze folder"}
+              title={busy === "preview" ? "Cancel analysis" : "Analyze folder"}
+              data-analyzing={busy === "preview"} aria-busy={busy === "preview"}
+              onClick={busy === "preview" ? cancelAnalysis : createPreview}
+              disabled={(busy !== null && busy !== "preview") || !source.trim() || !apiReady}>
+              {busy === "preview" ? <X size={17} /> : <FolderSearch size={17} strokeWidth={1.8} />}
+              <span className="sortly-analyze-label">{busy === "preview" ? "Cancel" : "Analyze"}</span>
+            </Button>
+          </div>
+          <ChatPanel disabled={busy !== null || Boolean(preview && !apiReady)} busy={busy === "chat"}
+            draft={chatDraft} onDraftChange={(text) => {
+              setChatDraft(text);
+              if (source.trim()) conversationFolder.current = folderIdentity(source);
+            }} messages={chatMessages} error={chatError}
+            hasPreview={Boolean(preview)} onSend={sendChat} />
+          {busy === "preview" && <AnalysisActivity />}
+        </section>
 
-        <div className="my-5 border-t border-line" />
-
-        <div className="space-y-1">
-          <p className="ui-eyebrow mb-2 px-3 text-ink-muted">Quick actions</p>
-          <Button variant="ghost" size="sm" className="w-full justify-start" onClick={undo} disabled={!undoAvailable || busy !== null || !apiReady}>
-            <RotateCcw size={16} /> Undo last move
-          </Button>
+        <div className="sortly-feedback">
+          {busy === "apply" && <div className="workflow-status mt-4" role="status">
+            <LoaderCircle size={17} className="animate-spin" /><span className="text-sm">Applying the confirmed plan…</span>
+          </div>}
+          {message && <Notice tone="success" text={message} />}
+          {error && <Notice tone="error" text={error} />}
+          {apiRuntime.state !== "ready" && <ServiceNotice runtime={apiRuntime} subject="Analysis" />}
         </div>
 
-        <div className="mt-auto rounded-lg border border-line bg-surface-secondary/70 p-3">
-          <div className="flex items-center gap-2 text-xs font-medium text-ink-soft">
-            <span className="size-2 rounded-full bg-success" /> Local workspace
-          </div>
-          <p className="mt-2 text-[11px] leading-relaxed text-ink-muted">Files stay on this computer. Moves require your confirmation.</p>
-        </div>
-      </aside>
-
-      <main className="app-main min-h-screen">
-        <header className="ui-header app-topbar sticky top-0 z-30 flex items-center justify-between border-b">
-          <div className="flex items-center gap-2 text-xs text-ink-muted">
-            Workspace <ChevronRight size={13} /> <span className="font-medium text-ink">{VIEW_META[activeView].label}</span>
-          </div>
-          <div className="flex items-center gap-2 rounded-full border border-line bg-surface-secondary/70 px-3 py-1.5 text-xs text-ink-soft">
-            <span className={`size-1.5 rounded-full ${apiReady ? "bg-success" : apiRuntime.state === "error" ? "bg-danger" : "bg-warning"}`} />
-            {apiReady ? "Local API ready" : apiRuntime.state === "error" ? "Local API unavailable" : "Starting local API"}
-          </div>
-        </header>
-
-        <div className="app-content">
-          {activeView === "organize" && (
-          <motion.div key="organize" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-            <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Sparkles size={13} className="text-accent-text" /> Your AI workspace</div>
-            <h1 className="page-title">A place for everything.</h1>
-            <p className="page-intro">Pick a folder. Preview the plan. Let AI do the sorting.</p>
-
-            <section className="ui-panel organize-source-panel mt-8">
-              <label className="ui-eyebrow mb-3 block text-ink-muted">Source folder</label>
-              <div className="ui-input-shell source-folder-control flex items-center gap-3">
-                <HardDrive size={17} className="shrink-0 text-ink-muted" />
-                <input
-                  value={source}
-                  onChange={(event) => { setSource(event.target.value); resetPreview(); }}
-                  className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
-                  placeholder={String.raw`C:\Users\you\Documents`}
-                />
-                <Button variant="secondary" size="sm" className="source-browse-button" onClick={chooseFolder} disabled={busy !== null || !apiReady}><Folder size={14} /> Browse</Button>
-              </div>
-              <fieldset className="organize-options">
-                <legend className="ui-eyebrow text-ink-muted">Organize options</legend>
-                <div className="organize-options-grid">
-                  <OptionSwitch label="Include subfolders" checked={recursive} onChange={(checked) => { setRecursive(checked); resetPreview(); }} />
-                  <OptionSwitch label="Suggest cleaner file names" checked={rename} onChange={(checked) => { setRename(checked); resetPreview(); }} />
-                  <OptionSwitch label="Reorganize already sorted files" checked={reorganize} onChange={(checked) => { setReorganize(checked); resetPreview(); }} />
-                  <OptionSwitch label="Allow redacted cloud analysis for sensitive files" checked={allowSensitiveCloud} tone="warning" onChange={(checked) => { setAllowSensitiveCloud(checked); resetPreview(); }} />
-                </div>
-              </fieldset>
-              <div className="organize-action-bar">
-                <Button className="organize-analyze-button h-9 px-3.5" onClick={createPreview} disabled={busy !== null || !source.trim() || !apiReady}>
-                  {busy === "preview" ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                  Analyze folder <ArrowRight size={15} />
-                </Button>
-              </div>
-            </section>
-
-            <AnimatePresence initial={false}>
-              {busy === "preview" && (
-                <motion.div
-                  role="status"
-                  className="workflow-status mt-4"
-                  initial={reducedMotion ? false : { opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reducedMotion ? undefined : { opacity: 0, y: -4 }}
-                  transition={{ duration: reducedMotion ? 0 : 0.2, ease: "easeOut" }}
-                >
-                  <span className="workflow-status-icon"><LoaderCircle size={17} className="animate-spin" /></span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-ink">Scanning and analyzing</span>
-                    <span className="mt-0.5 block text-xs text-ink-muted">Sortly is building a preview from the selected folder. No files will move during this step.</span>
-                  </span>
-                  <span className="workflow-indeterminate" aria-hidden="true" />
-                </motion.div>
-              )}
-              {busy === "apply" && (
-                <motion.div
-                  role="status"
-                  aria-live="polite"
-                  className="workflow-status mt-4"
-                  data-tone="accent"
-                  initial={reducedMotion ? false : { opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reducedMotion ? undefined : { opacity: 0, y: -4 }}
-                  transition={{ duration: reducedMotion ? 0 : 0.2, ease: "easeOut" }}
-                >
-                  <span className="workflow-status-icon"><LoaderCircle size={17} className="animate-spin" /></span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-ink">Applying the confirmed plan</span>
-                    <span className="mt-0.5 block text-xs text-ink-muted">Moving {selectedCount} selected {selectedCount === 1 ? "file" : "files"}. Results appear only after the local service responds.</span>
-                  </span>
-                  <span className="workflow-indeterminate" aria-hidden="true" />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <AnimatePresence>
-              {message && <Notice tone="success" text={message} />}
-              {error && <Notice tone="error" text={error} />}
-              {apiRuntime.state === "error" && <Notice tone="error" text={`Local API unavailable. ${apiRuntime.detail ?? ""}`.trim()} />}
-              {preview && preview.scan_summary.skipped > 0 && (
-                <Notice tone="warning" text={describeSkips(preview.scan_summary)} />
-              )}
-              {preview?.plan_warnings.map((warning) => <Notice key={warning} tone="error" text={warning} />)}
-            </AnimatePresence>
-
-            {preview && <PreviewSummary preview={preview} stats={reviewStats} groupCount={groups.length} />}
-
-            <AnimatePresence>
-              {completion && (
-                <CompletionSummary
-                  completion={completion}
-                  busy={busy !== null}
-                  onUndo={undo}
-                  onOpenFolder={openFolder}
-                  onViewHistory={() => navigateTo("history")}
-                />
-              )}
-            </AnimatePresence>
-
-            <AnimatePresence>
+        <section hidden={activeView !== "preview"} aria-label="Organization preview" className="sortly-preview">
+          {!preview && !completion && busy !== "preview" && <p className="mt-6 text-center text-sm text-ink-muted">Choose a folder and analyze it to generate a preview.</p>}
+          {preview && <>
+            {preview.scan_summary.skipped > 0 && <Notice tone="warning" text={describeSkips(preview.scan_summary)} />}
+            {preview.plan_warnings.map((warning) => <Notice key={warning} tone="warning" text={warning} />)}
+            {clarification && <Notice tone="warning" text={`Ask Sortly needs a clarification: ${clarification}`} />}
+            <PreviewSummary preview={preview} stats={reviewStats} groupCount={groups.length} />
+          </>}
+            <>
               {preview && preview.files.length > 0 && (
-                <motion.section
-                  initial={reducedMotion ? false : { opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={reducedMotion ? undefined : { opacity: 0, y: -4 }}
-                  transition={{ duration: reducedMotion ? 0 : 0.24, ease: "easeOut" }}
+                <section
+
                   className="ui-panel review-shell mt-6 overflow-hidden"
+                  inert={busy === "chat"}
                   aria-labelledby="review-heading"
                 >
                   <div className="review-header">
                     <div className="min-w-0">
                       <div className="ui-eyebrow flex items-center gap-2 text-ink-muted"><Sparkles size={13} className="text-accent-text" /> Ready for review</div>
-                      <h2 id="review-heading" className="mt-2 font-display text-xl font-semibold tracking-tight">Review files by destination</h2>
+                      <h2 ref={reviewHeading} tabIndex={-1} id="review-heading" className="mt-2 font-display text-xl font-semibold tracking-tight">Review files by destination</h2>
                       <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">
                         {reviewBatchMode === "large"
                           ? `${preview.files.length.toLocaleString()} files are grouped into ${groups.length.toLocaleString()} destinations. Review exceptions first, then expand only what you need.`
@@ -818,7 +826,7 @@ export default function App() {
 
                   <div className="review-footer">
                     <div className="flex items-center gap-2 text-xs text-ink-muted"><LockKeyhole size={14} /> Nothing changes until you review and confirm.</div>
-                    <Button onClick={() => setConfirmOpen(true)} disabled={busy !== null || selectedCount === 0 || invalidEditCount > 0}>{busy === "apply" && <LoaderCircle size={15} className="animate-spin" />} {busy === "apply" ? "Applying…" : invalidEditCount > 0 ? "Fix required fields" : "Review & organize"}</Button>
+                    <Button onClick={() => setConfirmOpen(true)} disabled={busy !== null || selectedCount === 0 || invalidEditCount > 0 || Boolean(clarification)}>{busy === "apply" && <LoaderCircle size={15} className="animate-spin" />} {busy === "apply" ? "Applying…" : invalidEditCount > 0 ? "Fix required fields" : "Review & organize"}</Button>
                   </div>
                   {invalidEditCount > 0 && (
                     <div className="plan-validation-summary" role="alert">
@@ -826,47 +834,58 @@ export default function App() {
                       <span>{invalidEditCount} selected {invalidEditCount === 1 ? "file needs" : "files need"} a non-empty destination and filename before you can continue.</span>
                     </div>
                   )}
-                </motion.section>
+                </section>
               )}
-            </AnimatePresence>
+            </>
 
-          </motion.div>
-          )}
-
-          {activeView === "history" && (
-            <motion.div key="history" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-              <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><HistoryIcon size={13} className="text-accent-text" /> Activity log</div>
-              <h1 className="page-title">Every move, reversible.</h1>
-              <p className="page-intro">Review organization runs across your workspace. Each run keeps its original undo path.</p>
-
-              <section className="ui-panel page-panel p-6">
-                {apiReady
-                  ? <HistoryPanel apiBase={apiBase} onChanged={() => { setUndoAvailable(false); setCompletion(null); }} />
-                  : <ServiceNotice runtime={apiRuntime} subject="History" />}
-              </section>
-            </motion.div>
-          )}
-
-          {activeView === "providers" && (
-            <motion.div key="providers" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-              <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Plug size={13} className="text-accent-text" /> Model routing</div>
-              <h1 className="page-title">Choose what powers analysis.</h1>
-              <p className="page-intro">Configure a primary model and explicit fallbacks. Credentials remain encrypted by the local backend.</p>
-
-              <section className="ui-panel page-panel p-6">
-                {apiReady
-                  ? <ProviderStudio open onOpenChange={() => undefined} apiBase={apiBase} presentation="page" />
-                  : <ServiceNotice runtime={apiRuntime} subject="Provider configuration" />}
-              </section>
-            </motion.div>
-          )}
-
-          {activeView === "settings" && (
-            <motion.div key="settings" initial={reducedMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: "easeOut" }}>
-              <SettingsPanel preference={themePreference} onChange={setThemePreference} />
-            </motion.div>
-          )}
+        </section>
+        <div hidden={activeView !== "organize" && activeView !== "preview"}>
+          {completion && <CompletionSummary completion={completion} busy={busy !== null} onUndo={undo} onOpenFolder={openFolder}
+            onViewHistory={() => navigateTo("history")} />}
         </div>
+
+        <section className="sortly-settings" hidden={activeView !== "settings"} aria-labelledby="settings-heading">
+          <div className="sortly-settings-heading">
+            <h1 id="settings-heading" className="page-title">Settings</h1>
+            <Button variant="ghost" size="sm" onClick={() => navigateTo(preview ? "preview" : "organize")}>Back</Button>
+          </div>
+          <section className="ui-panel p-5" aria-labelledby="analysis-settings-heading">
+            <h2 id="analysis-settings-heading" className="font-display text-lg font-semibold">Analysis</h2>
+              <fieldset className="organize-options" disabled={busy !== null}>
+                <legend className="ui-eyebrow text-ink-muted">Organize options</legend>
+                <div className="organize-options-grid">
+                  <OptionSwitch label="Include subfolders" checked={recursive} onChange={(checked) => { setRecursive(checked); resetPreview(); }} />
+                  <OptionSwitch label="Suggest cleaner file names" checked={rename} onChange={(checked) => { setRename(checked); resetPreview(); }} />
+                  <OptionSwitch label="Reorganize already sorted files" checked={reorganize} onChange={(checked) => { setReorganize(checked); resetPreview(); }} />
+                  <OptionSwitch label="Allow redacted cloud analysis for sensitive files" checked={allowSensitiveCloud} tone="warning" onChange={(checked) => { setAllowSensitiveCloud(checked); resetPreview(); }} />
+                </div>
+              </fieldset>
+          </section>
+          {settingsVisited && <div className="sortly-settings-sections" inert={busy !== null}>
+            <details className="ui-panel"><summary>Appearance</summary><SettingsPanel preference={themePreference} onChange={setThemePreference} /></details>
+          </div>}
+        </section>
+        <section className="sortly-providers" hidden={activeView !== "providers"} aria-labelledby="providers-heading">
+          <div className="sortly-settings-heading">
+            <h1 id="providers-heading" className="page-title">Providers</h1>
+            <Button variant="ghost" size="sm" onClick={() => navigateTo(preview ? "preview" : "organize")}>Back</Button>
+          </div>
+          <div className="ui-panel p-5" inert={busy !== null}>
+            {showProviders && (apiReady ? <ProviderStudio open apiBase={apiBase} presentation="page" /> : <ServiceNotice runtime={apiRuntime} subject="Providers" />)}
+          </div>
+        </section>
+        <section className="sortly-history" hidden={activeView !== "history"} aria-labelledby="history-heading">
+          <div className="sortly-settings-heading">
+            <h1 id="history-heading" className="page-title">History</h1>
+            <Button variant="ghost" size="sm" onClick={() => navigateTo(preview ? "preview" : "organize")}>Back</Button>
+          </div>
+          <div className="mb-4 flex justify-end">
+            <Button variant="secondary" onClick={undo} disabled={!undoAvailable || !source.trim() || busy !== null || !apiReady}><RotateCcw size={15} /> Undo last move</Button>
+          </div>
+          <div className="ui-panel p-5" inert={busy !== null}>
+            {showHistory && (apiReady ? <HistoryPanel apiBase={apiBase} onChanged={() => { setUndoAvailable(false); setCompletion(null); }} /> : <ServiceNotice runtime={apiRuntime} subject="History" />)}
+          </div>
+        </section>
       </main>
 
       <Dialog.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
@@ -876,6 +895,9 @@ export default function App() {
             <div className="grid size-11 place-items-center rounded-lg bg-accent-soft text-accent-text"><FolderOpen size={21} /></div>
             <Dialog.Title className="font-display mt-4 text-lg font-semibold tracking-tight">Organize these files?</Dialog.Title>
             <Dialog.Description className="mt-2 text-sm leading-relaxed text-ink-soft">Sortly will submit {selectedCount} selected files using the edits above. The backend may normalize paths or resolve collisions before moving. Unselected files stay in the source folder.</Dialog.Description>
+            {extensionChangeCount > 0 && <p className="mt-3 text-sm text-ink-soft">
+              {extensionChangeCount} selected {extensionChangeCount === 1 ? "file will have its extension" : "files will have their extensions"} changed. File contents will not be converted.
+            </p>}
             {preview?.requires_confirmation && (
               <label className="mt-4 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-soft p-3 text-xs text-warning">
                 <input type="checkbox" checked={riskAcknowledged} onChange={(event) => setRiskAcknowledged(event.target.checked)} className="mt-0.5 accent-warning" />
@@ -884,7 +906,7 @@ export default function App() {
             )}
             <div className="mt-6 flex gap-3">
               <Dialog.Close asChild><Button variant="secondary" className="flex-1">Cancel</Button></Dialog.Close>
-              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null || !apiReady || invalidEditCount > 0 || Boolean(preview?.requires_confirmation && !riskAcknowledged)}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
+              <Button className="flex-1" onClick={applyPlan} disabled={busy !== null || !apiReady || Boolean(clarification) || invalidEditCount > 0 || Boolean(preview?.requires_confirmation && !riskAcknowledged)}>{busy === "apply" && <LoaderCircle size={16} className="animate-spin" />} Confirm moves</Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -915,9 +937,11 @@ function OptionSwitch({
   checked,
   tone = "accent",
   onChange,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
+  disabled?: boolean;
   tone?: "accent" | "warning";
   onChange: (checked: boolean) => void;
 }) {
@@ -929,6 +953,7 @@ function OptionSwitch({
         role="switch"
         aria-checked={checked}
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
         className="sr-only"
       />
@@ -956,10 +981,6 @@ function SettingsPanel({
 
   return (
     <>
-      <div className="ui-eyebrow page-eyebrow flex items-center gap-2"><Settings2 size={13} className="text-accent-text" /> Preferences</div>
-      <h1 className="page-title">Make the workspace yours.</h1>
-      <p className="page-intro">Only preferences implemented by the current frontend appear here.</p>
-
       <section className="ui-panel page-panel overflow-hidden" aria-labelledby="appearance-heading">
         <div className="border-b border-line p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1026,7 +1047,6 @@ function PreviewSummary({ preview, stats, groupCount }: {
   stats: ReviewStats;
   groupCount: number;
 }) {
-  const reducedMotion = useReducedMotion();
   const skippedReasons = Object.entries(preview.scan_summary.reasons ?? {}).filter(([, count]) => count > 0);
   const title = stats.security > 0
     ? "Review sensitive files before organizing."
@@ -1034,10 +1054,8 @@ function PreviewSummary({ preview, stats, groupCount }: {
       ? "Most files are ready. A few need a closer look."
       : "Your files are ready to review.";
   return (
-    <motion.section
-      initial={reducedMotion ? false : { opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: reducedMotion ? 0 : 0.22, ease: "easeOut" }}
+    <section
+
       className="review-summary-strip mt-4 overflow-hidden"
       aria-label="Scan and preview summary"
     >
@@ -1067,7 +1085,7 @@ function PreviewSummary({ preview, stats, groupCount }: {
           {skippedReasons.map(([reason, count]) => <span key={reason}>{count} skipped: {skipReasonLabel(reason)}</span>)}
         </div>
       )}
-    </motion.section>
+    </section>
   );
 }
 
@@ -1084,7 +1102,6 @@ function CompletionSummary({
   onOpenFolder: () => void;
   onViewHistory: () => void;
 }) {
-  const reducedMotion = useReducedMotion();
   const notReported = Math.max(completion.requested - completion.moved, 0);
   const complete = completion.status === "success" && notReported === 0;
   const movedNothing = completion.moved === 0;
@@ -1097,11 +1114,8 @@ function CompletionSummary({
       : "Plan partially completed";
 
   return (
-    <motion.section
-      initial={reducedMotion ? false : { opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={reducedMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: reducedMotion ? 0 : 0.36, ease: "easeOut" }}
+    <section
+
       className="ui-panel mt-6 overflow-hidden"
       aria-labelledby="completion-heading"
     >
@@ -1155,7 +1169,7 @@ function CompletionSummary({
         <Button variant="secondary" onClick={onUndo} disabled={busy || completion.moved === 0}><RotateCcw size={15} /> Undo</Button>
         <Button onClick={onOpenFolder} disabled={busy}><ExternalLink size={15} /> Open folder</Button>
       </div>
-    </motion.section>
+    </section>
   );
 }
 
@@ -1167,13 +1181,14 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const validationId = useId();
-  const reducedMotion = useReducedMotion();
   const current = edit ?? {
     accepted: file.selected,
     target_path: file.target_path,
     destination_name: file.destination_name,
   };
   const nameChanged = current.destination_name !== file.name;
+  // Apply preserves the extension in the backend's plan, including during name edits.
+  const extensionChange = getFilenameExtensionChange(file.name, file.destination_name);
   const destinationInvalid = current.accepted && !current.target_path.trim();
   const filenameInvalid = current.accepted && !current.destination_name.trim();
   const status = getFileReviewStatus(file, current);
@@ -1187,44 +1202,49 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
   };
   const change = (next: FileEdit) => onChange(file.id, next);
   return (
-    <article data-file-id={file.id} className="plan-file review-file" data-excluded={!current.accepted} data-status={status}>
+    <article data-file-id={file.id} aria-label={file.name} className="plan-file review-file" data-excluded={!current.accepted} data-status={status}>
       <div className="review-file-head">
         <label className="review-include">
           <input
             type="checkbox"
             checked={current.accepted}
+            aria-label={`Include ${file.name}`}
             onChange={(event) => change({ ...current, accepted: event.target.checked })}
             className="accent-accent"
           />
           <span className="min-w-0">
             <strong title={file.name}>{file.name}</strong>
-            <span>{current.accepted ? "Included in this plan" : "Will stay in the source folder"}</span>
           </span>
         </label>
-        {status !== "ready" && (
-          <span className="review-status-chip" data-tone={status}>
-            <AlertTriangle size={12} />
-            {statusLabel[status]}
-          </span>
-        )}
+        <div className="review-row-actions">
+          {status !== "ready" && status !== "excluded" && <span className="review-status-chip" data-tone={status}>
+              <AlertTriangle size={12} />{statusLabel[status]}
+          </span>}
+          <button type="button" className="file-details-trigger" aria-expanded={detailsOpen} aria-controls={detailsId}
+            aria-label={detailsOpen ? "Hide details" : "Edit or view details"} onClick={() => setDetailsOpen((open) => !open)}>
+            <span>{detailsOpen ? "Close" : "Details"}</span>
+            <ChevronDown size={13} className="file-details-chevron" data-open={detailsOpen} />
+          </button>
+        </div>
       </div>
 
-      <div className="review-file-plan">
-        <div>
-          <span>Destination</span>
-          <strong title={current.target_path}>{current.target_path.split("/").join(" › ")}</strong>
-        </div>
-        <div>
-          <span>Filename</span>
+      {(nameChanged || extensionChange) && <div className="review-file-changes">
+        {nameChanged && <p className="review-rename-summary">
+          <ArrowRight size={13} aria-hidden="true" /><span className="sr-only">Rename to</span>
           <code title={current.destination_name}>{current.destination_name}</code>
-        </div>
-      </div>
-
-      {nameChanged && (
-        <p className="review-rename-summary">
-          <span>{file.name}</span><ArrowRight size={13} aria-hidden="true" /><span>{current.destination_name}</span>
-        </p>
-      )}
+        </p>}
+        {extensionChange && <p className="review-extension-change">
+          <span>Planned extension:</span>
+          <code>{extensionChange.from || "(none)"}</code>
+          <ArrowRight size={13} aria-hidden="true" /><span className="sr-only">to</span>
+          <code>{extensionChange.to || "(none)"}</code>
+        </p>}
+      </div>}
+      {current.target_path !== file.target_path && <p className="review-edited-destination">
+        <Folder size={12} aria-hidden="true" /><span className="sr-only">Destination:</span>
+        <span>{current.target_path.split("/").join(" › ")}</span>
+      </p>}
+      {!current.accepted && <p className="review-kept-note">Stays in source</p>}
 
       {warningSummary && status !== "ready" && (
         <p className="review-warning-summary" data-tone={status}>
@@ -1233,32 +1253,19 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
         </p>
       )}
 
-      <button
-        type="button"
-        className="file-details-trigger"
-        aria-expanded={detailsOpen}
-        aria-controls={detailsId}
-        onClick={() => setDetailsOpen((open) => !open)}
-      >
-        <ChevronDown size={14} className="file-details-chevron" data-open={detailsOpen} />
-        <span>{detailsOpen ? "Hide details" : "Edit or view details"}</span>
-        {warnings.length > 0 && <span className="file-details-count">{warnings.length}</span>}
-      </button>
-
-      <AnimatePresence initial={false}>
+      <>
         {detailsOpen && (
-          <motion.div
+          <div
             id={detailsId}
-            initial={reducedMotion ? false : { height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={reducedMotion ? undefined : { height: 0, opacity: 0 }}
-            transition={{ duration: reducedMotion ? 0 : 0.2, ease: "easeOut" }}
+
             className="overflow-hidden"
           >
             <div className="file-details-panel">
+              <p className="review-original-name"><span>Original file</span><code>{file.name}</code></p>
               <div className="review-edit-grid">
                 <label>Destination folder
                   <input
+                    aria-label="Destination folder"
                     value={current.target_path}
                     onChange={(event) => change({ ...current, target_path: event.target.value })}
                     disabled={!current.accepted}
@@ -1271,6 +1278,7 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
                 </label>
                 <label>Proposed filename
                   <input
+                    aria-label="Proposed filename"
                     value={current.destination_name}
                     onChange={(event) => change({ ...current, destination_name: event.target.value })}
                     disabled={!current.accepted}
@@ -1308,9 +1316,9 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
                 {file.evidence_sources.length > 0 && <span>Evidence sources: {file.evidence_sources.join(", ")}</span>}
               </div>
             </div>
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
+      </>
     </article>
   );
 });
@@ -1318,36 +1326,32 @@ const FilePreviewRow = memo(function FilePreviewRow({ file, edit, onChange }: {
 function Notice({ tone, text }: { tone: "success" | "error" | "warning"; text: string }) {
   const success = tone === "success";
   const warning = tone === "warning";
-  const reducedMotion = useReducedMotion();
-  return <motion.div
-    initial={reducedMotion ? false : { opacity: 0, y: 5 }}
-    animate={{ opacity: 1, y: 0 }}
-    exit={reducedMotion ? undefined : { opacity: 0 }}
-    transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }}
+  return <div
+
     className={`mt-4 flex items-start gap-2 rounded-lg border p-3 text-sm ${success ? "border-success/25 bg-success-soft text-success" : warning ? "border-warning/25 bg-warning-soft text-warning" : "border-danger/25 bg-danger-soft text-danger"}`}
   >
     {success ? <Check size={16} className="mt-0.5" /> : warning ? <ShieldCheck size={16} className="mt-0.5" /> : <X size={16} className="mt-0.5" />}<span>{text}</span>
-  </motion.div>;
+  </div>;
 }
 
-function HierarchyTree({ node }: { node: HierarchyNode }) {
+function HierarchyTree({ node, initiallyOpen = true }: { node: HierarchyNode; initiallyOpen?: boolean }) {
   return <div className="rounded-lg border border-line bg-surface-inset p-3 text-sm">
     <div className="flex items-center gap-2 font-medium text-ink"><FolderOpen size={16} className="text-accent-text" />{node.name}</div>
     <div className="ml-3 mt-2 border-l border-line pl-3">
-      {node.folders.map((folder) => <details key={folder.name} open className="group py-1">
+      {node.folders.map((folder) => <details key={folder.name} open={initiallyOpen} className="group py-1">
         <summary className="flex cursor-pointer list-none items-center gap-2 text-ink-soft"><ChevronDown size={14} className="transition group-open:rotate-0 -rotate-90" /><Folder size={15} className="text-accent-text" />{folder.name}</summary>
-        <div className="ml-3 mt-1 border-l border-line pl-3"><HierarchyTreeContents node={folder} /></div>
+        <div className="ml-3 mt-1 border-l border-line pl-3"><HierarchyTreeContents node={folder} initiallyOpen={initiallyOpen} /></div>
       </details>)}
       {node.files.map((file) => <div key={file} className="flex items-center gap-2 py-1 text-ink-soft"><FileText size={14} className="text-ink-faint" />{file}</div>)}
     </div>
   </div>;
 }
 
-function HierarchyTreeContents({ node }: { node: HierarchyNode }) {
+function HierarchyTreeContents({ node, initiallyOpen = true }: { node: HierarchyNode; initiallyOpen?: boolean }) {
   return <>
-    {node.folders.map((folder) => <details key={folder.name} open className="group py-1">
+    {node.folders.map((folder) => <details key={folder.name} open={initiallyOpen} className="group py-1">
       <summary className="flex cursor-pointer list-none items-center gap-2 text-ink-soft"><ChevronDown size={14} className="transition group-open:rotate-0 -rotate-90" /><Folder size={15} className="text-accent-text" />{folder.name}</summary>
-      <div className="ml-3 mt-1 border-l border-line pl-3"><HierarchyTreeContents node={folder} /></div>
+      <div className="ml-3 mt-1 border-l border-line pl-3"><HierarchyTreeContents node={folder} initiallyOpen={initiallyOpen} /></div>
     </details>)}
     {node.files.map((file) => <div key={file} className="flex items-center gap-2 py-1 text-ink-soft"><FileText size={14} className="text-ink-faint" />{file}</div>)}
   </>;
