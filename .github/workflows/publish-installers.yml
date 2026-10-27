@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       macos_run:
-        description: Successful Apple Silicon and Intel build run ID
+        description: Successful Apple Silicon build run ID
         required: true
         type: string
 
@@ -52,12 +52,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: installers-macos-arm64
-          run-id: ${{ inputs.macos_run }}
-          github-token: ${{ github.token }}
-          path: release-assets
-      - uses: actions/download-artifact@v4
-        with:
-          name: installers-macos-x64
           run-id: ${{ inputs.macos_run }}
           github-token: ${{ github.token }}
           path: release-assets

@@ -16,7 +16,7 @@ common = ['app', 'frontend', 'src-tauri/src', 'src-tauri/icons', 'src-tauri/capa
           'requirements-build.txt', 'requirements-dev.txt', 'package.json', 'package-lock.json',
           'scripts/build-sidecar.py', 'scripts/smoke-sidecar.py', 'scripts/smoke-desktop.py', 'tests']
 for platform, variable in [('windows-x64', 'WINDOWS_RUN'), ('linux-x64', 'LINUX_RUN'),
-                           ('macos-arm64', 'MACOS_RUN'), ('macos-x64', 'MACOS_RUN')]:
+                           ('macos-arm64', 'MACOS_RUN')]:
     run_id = os.environ[variable]
     if not re.fullmatch(r'\d+', run_id):
         raise SystemExit('Run IDs must be numeric')

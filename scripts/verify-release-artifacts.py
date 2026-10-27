@@ -8,7 +8,7 @@ root = Path(__file__).resolve().parents[1]
 version = json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
 folder = Path(sys.argv[1]).resolve()
 expected = {'windows-x64': {'.exe': 1}, 'linux-x64': {'.deb': 1, '.AppImage': 1},
-            'macos-arm64': {'.dmg': 1}, 'macos-x64': {'.dmg': 1}}
+            'macos-arm64': {'.dmg': 1}}
 verified = set()
 for platform, extensions in expected.items():
     manifest = folder / f'SHA256SUMS-{platform}.txt'

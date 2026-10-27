@@ -12,13 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--platform', choices=['windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64'], required=True)
+    parser.add_argument('--platform', choices=['windows-x64', 'linux-x64', 'macos-arm64'], required=True)
     args = parser.parse_args()
     version = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
     for name in ('frontend/package.json', 'src-tauri/tauri.conf.json'):
         assert json.loads((ROOT / name).read_text(encoding='utf-8'))['version'] == version
     patterns = {'windows-x64': ['nsis/*-setup.exe'], 'linux-x64': ['deb/*.deb', 'appimage/*.AppImage'],
-                'macos-arm64': ['dmg/*.dmg'], 'macos-x64': ['dmg/*.dmg']}[args.platform]
+                'macos-arm64': ['dmg/*.dmg']}[args.platform]
     output = ROOT / 'release-assets'
     output.mkdir(exist_ok=True)
     manifest = []

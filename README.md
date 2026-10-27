@@ -11,7 +11,6 @@ Sortly is a desktop file organizer for Windows, Linux, and macOS with optional L
 | Windows x64 | `Sortly_1.0.9_x64-setup.exe` |
 | Linux x64 | `.deb` for Debian/Ubuntu, or `.AppImage` |
 | macOS Apple Silicon | `_aarch64.dmg` |
-| macOS Intel | `_x64.dmg` |
 
 Installers include the local service: Python and Node.js are not required. Check downloads against their platform's `SHA256SUMS` file on the release page. Windows builds are unsigned; macOS builds use ad-hoc signing and are **not Apple notarized**, so macOS may require approval in Privacy & Security. The macOS build targets version 13 or newer. Linux packages are built on Ubuntu 22.04; compatibility with every distribution is not guaranteed.
 
@@ -165,11 +164,11 @@ python scripts/build-sidecar.py
 npm run tauri -- build
 ```
 
-Linux outputs are in `src-tauri/target/release/bundle/deb/` and `appimage/`. macOS outputs are in `bundle/dmg/`, with the app in `bundle/macos/`. Each macOS architecture is built on its own native runner. The platform config files preserve the Windows NSIS target.
+Linux outputs are in `src-tauri/target/release/bundle/deb/` and `appimage/`. Apple Silicon macOS outputs are in `bundle/dmg/`, with the app in `bundle/macos/`. The platform config files preserve the Windows NSIS target. Intel Mac packages are not part of this release.
 
-The **Desktop release** GitHub Actions workflow builds Windows x64, Ubuntu 22.04 x64, Apple Silicon, and Intel macOS independently. It runs backend and frontend tests, frozen-API regressions with a local fixture provider, and native desktop/API startup checks before collecting installers and checksums. It runs on the release branch or can be started manually. A manual run against a matching `vX.Y.Z` tag publishes only after every platform passes.
+The **Desktop release** GitHub Actions workflow builds Windows x64, Ubuntu 22.04 x64, and Apple Silicon macOS independently. It runs backend and frontend tests, frozen-API regressions with a local fixture provider, and native desktop/API startup checks before collecting installers and checksums. It runs on the release branch or can be started manually. A manual run against a matching `vX.Y.Z` tag publishes only after every platform passes.
 
-The **Publish verified installers** workflow can instead reuse successful build artifacts. Run it against a release tag with the Windows, Linux and macOS build run IDs. It checks that all four native jobs passed, that their application source matches the tag, and that every installer matches its checksum before publishing. Documentation and CI-only changes do not require rebuilding the apps.
+The **Publish verified installers** workflow can instead reuse successful build artifacts. Run it against a release tag with the Windows, Linux and macOS build run IDs. It checks that all three native jobs passed, that their application source matches the tag, and that every installer matches its checksum before publishing. Documentation and CI-only changes do not require rebuilding the apps.
 
 Mac builds currently have ad-hoc signatures. Developer ID signing and Apple notarization require separate credentials; see [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/). The CI test keychain contains generated fixture credentials only and is not shipped.
 
