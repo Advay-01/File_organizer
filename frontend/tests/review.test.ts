@@ -4,6 +4,7 @@ import {
   describeSkips,
   filterReviewGroups,
   getFileReviewStatus,
+  getFilenameExtensionChange,
   getInitialGroupLimit,
   getReviewBatchMode,
   shouldExpandGroupsInitially,
@@ -32,6 +33,15 @@ function file(overrides: Partial<ReviewFile> = {}): ReviewFile {
     ...overrides,
   };
 }
+
+test("extension changes distinguish type corrections from ordinary and case-only renames", () => {
+  assert.deepEqual(getFilenameExtensionChange("notes.html", "notes.csv"), { from: ".html", to: ".csv" });
+  assert.equal(getFilenameExtensionChange("draft.txt", "plant_notes.txt"), null);
+  assert.equal(getFilenameExtensionChange("notes.PDF", "Notes.pdf"), null);
+  assert.deepEqual(getFilenameExtensionChange("report.v2.html", "report.v2.csv"), { from: ".html", to: ".csv" });
+  assert.deepEqual(getFilenameExtensionChange("README", "README.txt"), { from: "", to: ".txt" });
+  assert.deepEqual(getFilenameExtensionChange(".env", "environment.txt"), { from: "", to: ".txt" });
+});
 
 test("small, medium, and large batches use progressive disclosure", () => {
   assert.equal(getReviewBatchMode(30), "small");
@@ -101,6 +111,17 @@ test("security takes precedence over ordinary attention", () => {
   });
   assert.equal(getFileReviewStatus(item), "security");
   assert.match(summarizeFileWarning(item), /sensitive content/i);
+});
+
+test("ordinary clearer names and untouched uncertain files do not inflate review counts", () => {
+  const files = [
+    file({ id: "name", filename_conflict: "generic" }),
+    file({ id: "unreadable", selected: false, confidence: "low", extraction_status: "unavailable", evidence_sufficient: false }),
+    file({ id: "real-mismatch", filename_conflict: "extension_mismatch" }),
+  ];
+  assert.deepEqual(files.map((item) => getFileReviewStatus(item)), ["ready", "excluded", "attention"]);
+  assert.equal(summarizeFileWarning(files[1]), "");
+  assert.equal(summarizeReview(files, {}).attention, 1);
 });
 
 test("group summaries and large initial rendering stay bounded", () => {

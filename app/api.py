@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from copy import deepcopy
 import json
+import os
 import logging
 from pathlib import Path
 import re
@@ -305,10 +306,18 @@ def _hierarchy(root: Path, moves: List[dict]) -> dict:
     return freeze(tree)
 
 
-def _unique_destination(destination: Path, taken: set[str]) -> Path:
+def _same_path(first: Path | str, second: Path | str) -> bool:
+    return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
+
+
+def _unique_destination(destination: Path, taken: set[str], source: Path | str | None = None) -> Path:
+    # A source is not a collision, including when a suffix candidate reaches
+    # its current name. Repeated analysis must not keep incrementing that suffix.
     candidate = destination
     index = 1
-    while str(candidate).casefold() in taken or candidate.exists():
+    while (str(candidate).casefold() in taken or candidate.exists()) and not (
+        source is not None and _same_path(candidate, source)
+    ):
         candidate = destination.with_name(f"{destination.stem}-{index}{destination.suffix}")
         index += 1
     taken.add(str(candidate).casefold())
@@ -326,15 +335,17 @@ def _content_moves(
             suggestion.category,
             suggestion.subcategory,
         )
-        destination = _unique_destination(destination_folder / suggestion.suggested_name, taken)
+        current = _resolve_plan_source(suggestion.path, source)
+        destination = _unique_destination(destination_folder / suggestion.suggested_name, taken, current)
         moves.append(
             Move(
-                str(_resolve_plan_source(suggestion.path, source)),
+                str(current),
                 str(destination),
                 suggestion.category,
                 suggestion.reasoning,
                 suggestion.subcategory,
-                suggestion.selected,
+                # Already in the right place with the right name: nothing to do.
+                suggestion.selected and not _same_path(destination, current),
             )
         )
     return moves
@@ -347,7 +358,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
         if not selected_targets.issubset(available_targets):
             raise HTTPException(400, "The selected targets do not match this preview.")
         for move in plan.moves:
-            move.selected = _target_path(move) in selected_targets
+            move.selected = _target_path(move) in selected_targets and not _same_path(move.src, move.dest)
         return plan.moves
 
     edits = {edit.id: edit for edit in request.files}
@@ -379,14 +390,16 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
             category, subcategory = sanitize_target_path(target_path)
         planned_extension = Path(original.dest).suffix
         source = _resolve_plan_source(original.src, plan.source)
-        destination_name = sanitize_windows_filename(
-            edit.destination_name or Path(original.src).name,
-            Path(original.src).name,
-            target_extension=planned_extension,
+        requested_name = edit.destination_name or source.name
+        # An unchanged existing filename is already valid. Do not truncate it
+        # while applying a folder move with rename suggestions disabled.
+        destination_name = source.name if requested_name == source.name and planned_extension == source.suffix else (
+            sanitize_windows_filename(requested_name, source.name, target_extension=planned_extension)
         )
         destination = _unique_destination(
             plan.source.joinpath(category, subcategory, destination_name),
             taken,
+            source,
         )
         moves.append(
             Move(
@@ -395,7 +408,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
                 category,
                 original.reason,
                 subcategory,
-                True,
+                not _same_path(destination, source),
             )
         )
     return moves
@@ -518,7 +531,7 @@ def preview(request: PreviewRequest) -> PreviewResponse:
         plan_id=plan_id,
         source=str(source),
         analysis_seconds=round(perf_counter() - started, 2),
-        already_organized=0,
+        already_organized=sum(not move.selected and _same_path(move.src, move.dest) for move in moves),
         plan_warnings=plan_warnings,
         requires_confirmation=requires_confirmation,
         scan_summary={
@@ -610,10 +623,10 @@ def chat(request: ChatRequest) -> dict:
                 taken: set[str] = set()
                 for move in moves:
                     if move.selected:
-                        if Path(move.dest).resolve() == Path(move.src).resolve():
+                        if _same_path(move.dest, move.src):
                             move.selected = False
                         else:
-                            move.dest = str(_unique_destination(Path(move.dest), taken))
+                            move.dest = str(_unique_destination(Path(move.dest), taken, Path(move.src)))
                 new_id = str(uuid4())
                 new_plan = StoredPlan(
                     source=plan.source, moves=moves, suggestions=suggestions,
@@ -625,6 +638,7 @@ def chat(request: ChatRequest) -> dict:
                 sanity = evaluate_plan(suggestions)
                 response_preview = PreviewResponse(
                     plan_id=new_id, source=str(plan.source), analysis_seconds=0,
+                    already_organized=sum(not move.selected and _same_path(move.src, move.dest) for move in moves),
                     scan_summary=dict(plan.scan_summary),
                     analysis_stats=dict(plan.analysis_stats),
                     plan_warnings=list(sanity.warnings), requires_confirmation=sanity.requires_confirmation,

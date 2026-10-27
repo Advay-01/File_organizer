@@ -1,225 +1,177 @@
-# File Organizer
+# Sortly
 
-Sorts files into topic folders (`AI/`, `DSA/`, `Projects/`, ...) by reading their **content**, using any LLM provider.
+**Organize files by their contents. Review every change before it happens.**
 
-## Setup
-```
+Sortly is a Windows desktop file organizer with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
+
+[Download 1.0.7 for Windows x64](https://github.com/Advay-01/File_organizer/releases/download/v1.0.7/Sortly_1.0.7_x64-setup.exe) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/File_organizer/issues)
+
+## See it work
+
+![Sortly 1.0.7 working demo: analyze sample files, refine the plan with Ask Sortly, review and confirm moves, then undo](docs/assets/sortly-demo.gif)
+
+The animation records the running app using a real configured LLM and sample files. Waiting time is shortened for readability; the responses and file operations are real. Your own results depend on the files and selected model.
+
+## Organize a folder
+
+1. Open **Providers**, choose a provider and model, and test the configuration.
+2. In **Preview**, browse to a folder. Enable **Include subfolders** in Settings if you want to include nested files.
+3. Optionally use **Ask Sortly**: “Put DSA notes and LeetCode solutions together” or “Leave Projects alone.” You can give instructions before or after analysis.
+4. Choose **Analyze**. Review the compact file rows, destination groups, proposed names, extension changes, and warnings. Open **Details** to edit a suggestion or inspect its evidence.
+5. Choose **Review & organize**, then **Confirm moves**. Files move only after this confirmation. The resulting folder tree appears after the operation.
+
+Use **History** to inspect previous operations and access **Undo last move**. The completed operation also offers Undo and Open folder.
+
+## What you can do
+
+| Feature | Behavior |
+| --- | --- |
+| Content-based organization | Extracts bounded text and metadata, then proposes a dynamic category and subcategory. Existing folders are reused when they fit the subject. |
+| Ask Sortly | Answer questions about a preview, group files by topic, match extensions or relative paths, and exclude files. Newer instructions override conflicting earlier ones. |
+| Rename suggestions | Proposes descriptive names grounded in extracted evidence. Names over 80 characters also get a shorter suggestion when **Suggest cleaner file names** is enabled. |
+| Clear review | An unchanged file uses one row; extra information appears for renames, extension changes, warnings, and edited destinations. Full details stay expandable. |
+| Safe reruns | A file already at its intended location keeps its name, including an existing collision suffix, and is counted as already organized. |
+| Undo | Records completed moves and restores original paths and names when those paths are available. Conflicts are reported. |
+| Provider choice | Supports OpenAI, Anthropic, Google Gemini, DeepSeek, Groq, OpenRouter, Hugging Face, and local Ollama, with optional ordered fallbacks. |
+
+### Ask Sortly examples
+
+- “Why is this presentation in that folder?”
+- “Put all PDFs in Documents/PDFs.”
+- “Group recipes and the grocery list under Personal/Food.”
+- “Leave everything inside Projects alone.”
+
+Chat rules only refine a plan. They cannot delete files, execute file contents, rename files through a chat rule, or move detected sensitive files. Targets are limited to one or two relative folder levels. Topic matching uses the model; extension and path matching run locally after the instruction has been translated into rules.
+
+Chat stays available when switching tabs and reanalyzing the same folder. Selecting a **different folder** clears its conversation, draft, and instructions. Cancelling Browse or selecting the same folder keeps them. Instructions entered before selecting the first folder are retained for that first analysis.
+
+### Settings
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Include subfolders | Off | Scans nested folders as well as the selected folder. |
+| Suggest cleaner file names | On | Enables evidence-based names and automatic shortening of very long names. |
+| Reorganize already sorted files | Off | Requests fresh classification instead of reusing cached analysis. |
+| Allow redacted cloud analysis for sensitive files | Off | Allows an explicitly enabled redacted request; sensitive files remain unselected by default. |
+
+Appearance supports system, light, and dark themes. The theme preference is saved locally. Reduced-motion preferences are respected. Analysis uses a small wave indicator and can be cancelled from its action button.
+
+## Files and privacy
+
+Sortly can extract text or metadata from:
+
+- **Documents:** PDF, DOCX, PPTX, XLSX/XLSM, and EPUB.
+- **Text and code:** common source formats, Markdown, CSV, JSON, XML, configuration files, subtitles, chess PGN, and patch/diff files.
+- **Images:** supported image formats contribute dimensions and available metadata. The current pipeline does not send image pixels for visual classification.
+- **Archives:** bounded member listings from ZIP, TAR, GZIP/TGZ, and RAR. Archives are not unpacked.
+
+Detection checks file signatures and supported text structures. A proposed extension correction is shown explicitly in review and counted at confirmation. **Changing an extension does not convert file contents.** Generic readable text alone is not treated as proof that an unfamiliar extension is wrong.
+
+Likely Aadhaar, PAN, credentials, private keys, payment-card details, and personal financial documents are detected locally. Suspected sensitive files are excluded from cloud classification by default, omitted from chat context, and left unselected. Any permitted cloud evidence is redacted. Detection is heuristic, so review the flags. A Sensitive status leaves a file in its current location; it does not automatically relocate it or create a permission-protected folder.
+
+Provider API keys entered in Providers are encrypted with Windows DPAPI and never returned to the frontend. Files are processed locally for extraction; configuring a cloud LLM sends the allowed text and metadata evidence to that provider. Ollama is available for local model requests.
+
+## Safety and current limits
+
+- **Analyze does not move files.** Confirming uses the stored, reviewed plan rather than asking the model to create a new one.
+- Destination paths stay inside the approved root. Protected roots, detected project roots, junctions, partial downloads, and other excluded files are guarded by the scanner.
+- Existing files are never overwritten. Real collisions receive `-1`, `-2`, and later suffixes.
+- Warnings explain unusual plans, uncertain evidence, and potentially risky command text. Sortly never runs commands found inside scanned files.
+- Cancelling stops the frontend request and discards late results; it may not stop a model request already running on the server.
+- Very short but meaningful files can still receive overly cautious confidence scores. Chat does not yet receive all confidence, selection, and scan-skip details for diagnostic questions.
+- OCR requires optional external tooling and is not bundled. Scanned PDFs, image subjects, audio/video contents, and classic binary Office formats have limited or unavailable evidence.
+- Normal organization currently leaves emptied source folders behind. Undo prunes folders left empty by restoration. There is no automatic empty-folder cleanup feature in 1.0.7.
+- There is no verified duplicate-finder UI or automatic deletion. Classification quality depends on the model and available evidence.
+
+## Run from source
+
+The primary app uses **React + Tauri 2**, backed by a local **FastAPI** service.
+
+### Prerequisites
+
+- Windows x64, a working Python 3.10+ installation, and Node.js 22+.
+- A configured LLM provider or running local Ollama instance.
+- For desktop builds: Visual Studio C++ Build Tools and the Rust/NSIS tools prepared by the scripts.
+
+### Install dependencies
+
+From the repository root in PowerShell:
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-copy .env.example .env          # then add your key(s)
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+npm ci
+npm --prefix frontend ci
 ```
 
-## Usage
-```
-python -m app.main C:\path\to\folder                 # dry run (safe default)
-python -m app.main C:\path\to\folder --apply         # move files
-python -m app.main C:\path\to\folder -o C:\Sorted --apply
-python -m app.main C:\path\to\folder --recursive
-python -m app.main C:\path\to\folder --undo          # revert last --apply
-```
+Make sure `python` resolves to an installed interpreter rather than a Windows Store execution alias. Copy `.env.example` to `.env` only if you want environment-based provider configuration; the desktop Providers screen can store configuration instead.
 
-## Desktop UI
-```
-python -m app.gui
-```
-1. Click **Browse** and select the folder you want to organize.
-2. Click **Preview Plan**. This only scans files and asks the configured model for suggestions; it does not move anything.
-3. Review the destination and reason for every file, then click **Organize**.
-4. Accept the confirmation dialog to move the files. If you do not confirm, nothing changes.
+### Start the browser UI
 
-The UI creates topic folders inside the selected folder and uses the same safe planner, executor, collision handling, and undo log as the command-line interface. Leave the Models field blank to use `ORGANIZER_MODELS` from `.env` or the normal defaults; otherwise enter comma-separated model names in fallback order.
+In the first terminal:
 
-The plan creates a dynamic `Category/Subcategory` path from each file's name, format, and content. It creates broad useful subcategories on the spot—not from a fixed list—while avoiding one-off folders for tiny differences. For example, Physics files might become `Physics/Lab Reports` or `Physics/Formula Sheets`. Both folder levels are validated and shown in the preview before confirmation.
-
-Every proposed target subfolder starts **Selected** in the preview. Select any file in a target and click **Toggle Target** (or double-click its row) to switch it to **Keep in root**. That entire target group is excluded from organization, so its files are not moved.
-
-## React Desktop UI
-The `frontend/` folder contains the dark, electric-violet Sortly interface. It communicates only with the local API in `app/api.py`; the API stores the exact preview plan and never re-runs classification when you confirm.
-
-In one PowerShell window, start the local API from the project root:
-```
+```powershell
 .venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8765
 ```
 
-In a second PowerShell window, start the React interface:
-```
-cd frontend
-npm install
-npm run dev
-```
-
-Open the local address shown by Vite (normally `http://127.0.0.1:5173`). Choose a folder, analyze it, toggle any target groups you want to keep at the root, and explicitly confirm the remaining moves.
-Pick models with `-m` (repeat for fallbacks) or `ORGANIZER_MODELS` in `.env`:
-`gemini/gemini-2.5-flash`, `ollama/llama3.2`, `openai/<model>`, `deepseek/deepseek-chat`.
-Default: Gemini first, local Ollama as fallback.
-
-### Refine a preview with chat
-
-After **Analyze folder**, use **Refine with chat** to ask questions or give optional
-instructions such as “Put DSA notes and LeetCode solutions together” or “Leave
-Projects alone”. Chat uses the models configured in **Providers**, including their
-fallback order. It sends non-sensitive filenames, folder counts, proposed categories,
-and short redacted evidence excerpts; sensitive files are omitted from model context
-and chat rules leave them unchanged. Chat does not create permission-protected folders.
-
-The local `POST /api/chat` endpoint accepts `plan_id`, `message`, and optional current
-per-file review decisions (`files`, with the same shape as Apply). The model returns
-`ChatResult`: `reply`, `rules`, and `needs_clarification`. Each rule matches exactly
-one topic, extension, or relative glob and either moves matching files to a validated
-one- or two-level folder or excludes them. Questions and clarification return no rules.
-Topic matches are resolved against known non-sensitive file IDs; paths and extension/
-glob matches are checked locally. Newer instructions override earlier rules for the
-same files and conflicts are reported in the reply.
-
-The response contains `result` and an optional revised `preview`. Review that preview,
-then choose **Review & organize** and **Confirm moves**. Chat never executes moves;
-Apply uses the stored plan and existing safety checks and undo support. Chat rules
-and conversation context belong to the current preview session and are cleared on
-a fresh scan or service restart. Chat refinement is limited to files included in
-the preview, so enable **Include subfolders** before analyzing nested files.
-
-### Tauri 2 desktop app
-
-The Windows desktop shell launches the bundled Python API on a dynamically selected
-loopback port and gives the React frontend the actual address after a health check.
-
-#### Clean Windows build prerequisites
-
-- Windows with PowerShell and Python 3.10 or newer available as `python.exe`.
-- Node.js and npm. The repository does not pin a Node.js version; use a current
-  supported LTS release.
-- Visual Studio Build Tools with the **Desktop development with C++** workload,
-  including the MSVC x64 tools. The build locates them with `vswhere.exe`.
-- Internet access for npm packages, Python packages, project-local Rust, and
-  NSIS tools on the first build.
-
-#### Build
-
-Run these commands from the repository root in PowerShell:
+In the second:
 
 ```powershell
-npm install
-cd frontend
-npm install
-cd ..
+npm --prefix frontend run dev
+```
+
+Open the address printed by Vite. To use another API port, set `VITE_SORTLY_API` before starting Vite. The packaged desktop app selects and health-checks its own loopback port.
+
+### Build the Windows installer
+
+```powershell
 npm run rust:setup
-```
-
-```powershell
 npm run desktop:build
 ```
 
-The build automatically creates the project-local `.pyinstaller-venv` if it is
-missing, installs `requirements-build.txt` (the application runtime
-dependencies from `requirements.txt` plus pinned PyInstaller), and runs
-PyInstaller with that environment's interpreter. It then removes only known
-generated outputs, rebuilds and stages the sidecar, prepares local NSIS tools,
-builds the frontend, and packages the Tauri application. Rust is kept in the
-project-local `.cargo` and `.rustup` directories.
+The script creates or updates `.pyinstaller-venv`, installs `requirements-build.txt`, rebuilds and stages the Python sidecar, builds the frontend, and packages the Tauri app with NSIS. Optional scientific and embedding runtimes are excluded; no embedding model download is needed.
 
-The generated NSIS installer is under
-`src-tauri\target\release\bundle\nsis\` (the filename includes the product
-version and architecture). The sidecar is bundled from
-`src-tauri\binaries\sortly-api\`. Provider credentials are never bundled. For
-a packaged build, place `sortly.env` in the Tauri application configuration
-directory or set `SORTLY_ENV_FILE` to an external environment file before
-launch.
+Outputs:
 
-### Provider Studio
+```text
+src-tauri/target/release/sortly.exe
+src-tauri/target/release/bundle/nsis/Sortly_1.0.7_x64-setup.exe
+```
 
-Open **Provider Studio** in the desktop app to choose the provider and editable
-model ID used by Analyze. API keys are write-only in the UI, encrypted with
-Windows DPAPI in the app data directory, and never returned to the frontend.
+The installer is currently unsigned. Provider credentials and local sample folders are not bundled. A packaged app can also load an external `sortly.env` or a file specified by `SORTLY_ENV_FILE`.
 
-- Use **Refresh models** to retrieve IDs from the selected provider when its API
-  supports model discovery. A discovered ID is not treated as verified until
-  **Test active configuration** completes a real model request.
-- Fallback providers are optional. Add them explicitly and order them in the
-  dialog; no provider is selected silently.
-- Ollama uses no API key. Start it with `ollama serve`, then refresh models.
-- Hugging Face defaults to its OpenAI-compatible router. Enter a full legacy
-  `/models/<repository>` endpoint to use text-generation inference instead.
-- Environment variables in `.env` remain supported when a Provider Studio key
-  has not been stored for that provider.
+### Test
 
-## How it works
-`scanner` (file facts) -> `extractor` (text snippet from txt/code/PDF/DOCX) -> `planner` (batches files to the LLM, validates output) -> `executor` (dry run / move / undo log).
-`classifier` wraps litellm so one code path serves every provider, with model fallback and JSON repair.
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+npm --prefix frontend test
+npm --prefix frontend run build
+```
 
-### Content Intelligence
+Backend tests use temporary fixtures and mocked provider responses. The optional `frontend/tests/workspace.browser.cjs` suite requires Playwright and an installed Edge/Chromium browser; it intercepts API requests and never moves your files. Set `SORTLY_PLAYWRIGHT_MODULE` to an existing Playwright module directory when it is not installed on the normal Node module path, then run the script while Vite is running.
 
-The React desktop workflow uses a content-first preview:
+### Command line
 
-1. Files are content-fingerprinted and text/metadata evidence is extracted.
-2. Common file signatures are compared with extensions.
-3. The active Provider Studio configuration classifies bounded batches and proposes
-   grounded filenames.
-4. Later batches are shown folders selected earlier in the run. Files with identical
-   non-sensitive content converge on one supported folder, while each file keeps its
-   own filename, extension, and sensitivity result.
-5. Code verifies every evidence phrase against extracted content/metadata and caps
-   confidence when evidence is weak.
-6. Each file can be accepted, rejected, re-categorized, or renamed independently
-   before one confirmed move/rename operation.
+The original CLI remains available:
 
-Evidence extraction and analysis results are cached separately. Extraction is keyed
-by a full content hash, so renames reuse extraction while changed content cannot
-reuse stale analysis. Analysis keys also include the selected models, known folder
-set, custom endpoints, rename mode, and cache format version.
+```powershell
+.venv\Scripts\python.exe -m app.main C:\path\to\folder              # dry run
+.venv\Scripts\python.exe -m app.main C:\path\to\folder --apply      # move files
+.venv\Scripts\python.exe -m app.main C:\path\to\folder --undo       # undo
+```
 
-OCR is optional: image OCR runs only when both `pytesseract` and the external
-Tesseract executable are available. They are not bundled or currently installed,
-so image OCR and OCR for scanned PDFs must be treated as unavailable in this build.
-Audio/video tag extraction also remains unsupported because no media-tag runtime is
-installed.
+Use `--recursive` for nested files, `-o` for a separate output folder, and `-m` for explicit model IDs. The legacy Tk interface is available through `python -m app.gui`; the screenshots and workflow in this README describe the React/Tauri app.
 
-### Guarded scanning and sensitive content
+## Project layout
 
-Desktop scans reject protected roots and detected project roots, skip `.git`,
-`node_modules`, reparse points/junctions, hidden or system files, partial-download
-names, files above the configured size, and files modified within the configured
-recent-file window. Hidden directories and Sortly's own undo log stay excluded.
-Set `ORGANIZER_INCLUDE_HIDDEN_FILES=1` only when hidden files such as `.env`
-need deliberate local review; detected credentials remain redacted and
-unselected by default. Archive listings are bounded; archives are never extracted.
+```text
+app/api.py                  Preview, chat, review edits, Apply, and Undo endpoints
+app/core/                   Extraction, classification, privacy, planning, and history
+frontend/src/               React workspace and review interface
+src-tauri/                  Windows shell and local service lifecycle
+scripts/                    Desktop build and packaging helpers
+tests/                      Backend and packaging regressions
+frontend/tests/             Frontend unit and browser workflow checks
+```
 
-Likely Aadhaar, PAN, payment-card, API-key, private-key, and financial-document
-content is detected locally. Detection is heuristic and can produce false positives
-or false negatives. Suspected sensitive files are kept unselected by default, never
-go to cloud models unless explicitly enabled, and are redacted before any permitted
-model request. Their raw evidence is not persisted in the content cache.
-
-Unusual plans with excessive folders, concentrated destinations, or excessive
-`Misc` assignments display warnings and require an additional confirmation.
-
-Files left untouched by scanning are reported with plain-language notice text rather
-than an error, including why they were not analyzed. Local heuristics also flag bounded
-command patterns such as downloaded-and-executed scripts, encoded commands, destructive
-root-folder commands, and reverse-shell indicators. Detection only inspects text:
-Sortly never executes inspected file contents. These checks are heuristic and can
-produce false positives or false negatives.
-
-## Recognized file types
-The organizer scans all normal files. It can give the model content or metadata from:
-
-- Text and subtitles: TXT, SRT, VTT, SVG, and common source-code/text formats.
-- Documents: PDF, DOCX, PPTX, XLSX/XLSM, and EPUB.
-- Archives: ZIP, TAR, GZIP/TGZ, and RAR. Archives are not extracted; only their file lists are read.
-- Images: JPEG, PNG, HEIC, WebP, TIFF, BMP, and GIF. The model receives format, dimensions, available EXIF description, and the filename. For visual subject recognition inside an image, configure a vision-capable model separately.
-
-Classic binary Office formats (`.doc`, `.ppt`, `.xls`) are still scanned and can be sorted by filename, but they do not yet provide readable content to the model.
-
-## Safety
-- Dry run by default; `--apply` required to move anything.
-- Folder/file names from the LLM are sanitized, so nothing can escape the output folder.
-- Hallucinated paths are ignored; unclassified files go to `Misc/`.
-- Name collisions get `_1`, `_2` suffixes; nothing is overwritten.
-- A destination that appears after the preview is skipped rather than overwritten.
-- Every `--apply` is logged for `--undo`.
-
-## Tests
-`python -m unittest discover -s tests -v` (no API key needed). Install
-`requirements-dev.txt` instead of `requirements.txt` when running the test
-suite; it adds test-only dependencies without putting them in the packaged
-sidecar environment.
+[Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) · [MIT license](LICENSE)

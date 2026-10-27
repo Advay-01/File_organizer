@@ -72,7 +72,8 @@ export async function fetchJson<T>(
   let response: Response;
   try {
     response = await fetch(url, init);
-  } catch {
+  } catch (error) {
+    if (init?.signal?.aborted) throw error;
     throw new Error(
       "Could not reach the local Sortly service. Check History before trying again; do not repeat the Apply operation.",
     );

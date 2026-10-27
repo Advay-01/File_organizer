@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "sortly"
-version = "0.1.6"
+version = "1.0.7"
 dependencies = [
  "serde",
  "tauri",

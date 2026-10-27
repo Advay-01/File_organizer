@@ -21,6 +21,7 @@ from app.models.schemas import FileInfo
 from app.models.schemas import ContentIntelligenceResponse
 
 CONFIDENCE_LEVELS = {"high", "medium", "low", "insufficient"}
+LONG_FILENAME_LIMIT = 80
 INVALID_WINDOWS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
     f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
@@ -31,7 +32,7 @@ GENERIC_NAME = re.compile(
 )
 EXTENSION_OVERRIDES = {
     ".bmp", ".c", ".cpp", ".csv", ".docx", ".env", ".epub", ".gif", ".gz", ".html",
-    ".ini", ".ipynb", ".jpg", ".js", ".json", ".md", ".pdf", ".pem", ".png",
+    ".ini", ".ipynb", ".jpg", ".js", ".json", ".md", ".patch", ".pdf", ".pem", ".pgn", ".png",
     ".pptx", ".py", ".rar", ".sh", ".sql", ".svg", ".tar", ".tf", ".tiff", ".toml",
     ".txt", ".webp", ".xlsx", ".xml", ".zip",
 }
@@ -53,11 +54,16 @@ Rules:
 - reuse a folder from existing_folders (written Category/Subcategory, or one name) whenever it
   fits; never invent a near-duplicate of an existing name (for example Technology when Software
   already exists, or Sales Data next to Revenue Reports).
+- Reuse only folders that fit the subject. If none fits recognizable content, create an
+  appropriate category/subcategory; a missing folder is never a reason to choose Misc or an
+  unrelated existing folder. Reserve Misc for content whose subject cannot be established.
 - never put "/" or "\\" inside a category or subcategory; each is a single folder name.
 - files with identical content must receive the same category and subcategory.
 - high confidence requires substantial extracted content and a verified quote.
 - use insufficient and Misc/General when evidence is unreadable or too weak.
 - suggest a filename only when evidence clearly identifies the document.
+- Keep suggested filenames concise, at most 80 characters including the extension.
+  For very long filenames, retain useful topic words, dates, and identifiers.
 - when extension_mismatch is true and detected_type is supported by the evidence, use the
   detected_type extension. Otherwise preserve the original extension.
 - never use the old filename as proof of content.
@@ -241,6 +247,27 @@ def sanitize_windows_filename(
     return f"{candidate}{extension}"
 
 
+def _shorten_long_filename(name: str) -> str:
+    """Shorten existing wording without inventing content or changing the type."""
+    if len(name) <= LONG_FILENAME_LIMIT:
+        return name
+    extension = next((suffix for suffix in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
+                      if name.lower().endswith(suffix)), Path(name).suffix)
+    # Keep the original spelling and case of the extension.
+    extension = name[-len(extension):] if extension else ""
+    stem = name[:-len(extension)] if extension else name
+    budget = max(1, LONG_FILENAME_LIMIT - len(extension))
+    prefix = stem[:budget]
+    boundaries = list(re.finditer(r"[\s_.-]+", prefix))
+    if (boundaries and boundaries[-1].start() >= budget // 2
+            and not re.match(r"[\s_.-]", stem[budget:budget + 1])):
+        prefix = prefix[:boundaries[-1].start()]
+    prefix = prefix.rstrip(" ._-") or stem[:budget]
+    if prefix.upper() in RESERVED_NAMES:
+        prefix = f"{prefix}_File"[:budget]
+    return f"{prefix}{extension}"
+
+
 def _fallback_suggestion(file: FileInfo, evidence: EvidenceBundle) -> dict:
     return {
         "category": "Misc",
@@ -361,6 +388,8 @@ def _build_suggestion(
     model_conflict = str(result.get("filename_conflict", "none") or "none").lower()
     if model_conflict not in {"none", "generic", "misleading", "extension_mismatch"}:
         model_conflict = "none"
+    if model_conflict == "extension_mismatch" and not evidence.extension_mismatch:
+        model_conflict = "none"
     conflict = model_conflict
     if evidence.extension_mismatch and conflict == "none":
         conflict = "extension_mismatch"
@@ -403,6 +432,15 @@ def _build_suggestion(
             )
     elif allow_rename and proposed != file.filename:
         warnings.append("Suggested filename was rejected because its evidence phrase was not grounded.")
+
+    if (allow_rename and len(file.filename) > LONG_FILENAME_LIMIT
+            and not evidence.sensitive and evidence.extraction_status != "unavailable"):
+        suggested_name = _shorten_long_filename(suggested_name)
+        if suggested_name != file.filename:
+            length_reason = f"Long filename reduced from {len(file.filename)} to {len(suggested_name)} characters."
+            rename_reason = f"{rename_reason} {length_reason}".strip() if rename_reason else (
+                f"Shortened the existing filename while keeping its wording and extension. {length_reason}"
+            )
 
     if _generic_filename(file.filename) and name_grounded:
         conflict = "generic" if conflict == "none" else conflict

@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core import llm_http
 from app.core.classifier import extract_json
@@ -82,6 +82,9 @@ class ChatResult(StrictModel):
 SYSTEM_PROMPT = """You are Sortly's organization assistant. You do not move files.
 Convert the user's request into the smallest set of structured rules for a preview.
 Prefer topic or extension matches over filenames. Reuse existing folders/categories.
+Each rule MUST have exactly ONE non-null selector: topic OR extension OR glob.
+Set the other two selectors to null or omit them. Never combine a topic and extension
+in one rule. For multiple extensions, return a separate rule for each extension.
 If ambiguous, ask ONE short needs_clarification question and return no rules.
 For questions (such as why a file is in a folder), answer in reply with no rules.
 Never propose deletion. Sensitive files must be left untouched; this chat cannot
@@ -94,13 +97,28 @@ Rules affect only files in this preview. Return ONLY JSON matching this schema:
 
 def call_json(models: list[str], messages: list[dict], schema):
     for model in models:
-        try:
-            return schema.model_validate(extract_json(llm_http.direct_call_sync(
-                model, messages, timeout=60,
-            )))
-        except Exception:
-            # Do not expose provider error bodies or credentials in API responses.
-            continue
+        attempt_messages = messages
+        for attempt in range(2):
+            try:
+                return schema.model_validate(extract_json(llm_http.direct_call_sync(
+                    model, attempt_messages, timeout=60,
+                )))
+            except (ValidationError, ValueError) as error:
+                if attempt:
+                    break
+                # Give the model one chance to repair structure. Omit response
+                # values and provider errors from the feedback and diagnostics.
+                problems = [{"loc": item["loc"], "msg": item["msg"]} for item in error.errors(
+                    include_input=False, include_context=False, include_url=False,
+                )] if isinstance(error, ValidationError) else [{"msg": "Return one valid JSON object."}]
+                attempt_messages = [*messages, {"role": "system", "content": (
+                    "Your previous response did not match the required schema. Return corrected JSON only. "
+                    "Each rule must use exactly one of topic, extension, or glob; never combine selectors. "
+                    "Preserve all safety constraints. Validation problems: " + json.dumps(problems)
+                )}]
+            except Exception:
+                # Do not expose provider error bodies or credentials in API responses.
+                break
     raise RuntimeError("Chat could not get a valid response. Check Providers and try again.")
 
 

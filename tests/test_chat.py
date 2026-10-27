@@ -138,6 +138,29 @@ def test_provider_failure_is_safe_and_plan_is_unchanged(workspace):
     assert len(api.plans) == 1
 
 
+def test_invalid_combined_selector_gets_one_repair_attempt_without_exposing_values(workspace):
+    client, _ = workspace
+    invalid = result([move_rule(selector={"extension": ".txt", "glob": "private-example-*.txt"})])
+    with patch("app.core.llm_http.direct_call_sync", side_effect=[invalid, result([move_rule()])]) as completion:
+        response = client.post("/api/chat", json={"plan_id": "initial", "message": "Put text files in DSA"})
+    assert response.status_code == 200
+    assert completion.call_count == 2
+    feedback = completion.call_args.args[1][-1]["content"]
+    assert "exactly one" in feedback
+    assert "private-example" not in feedback
+    assert response.json()["preview"]["files"][0]["target_path"] == "DSA"
+
+
+def test_invalid_repair_is_bounded_and_does_not_store_a_plan(workspace):
+    client, _ = workspace
+    invalid = result([move_rule(target="../Escape")])
+    with patch("app.core.llm_http.direct_call_sync", return_value=invalid) as completion:
+        response = client.post("/api/chat", json={"plan_id": "initial", "message": "Move text files"})
+    assert response.status_code == 502
+    assert completion.call_count == 2
+    assert len(api.plans) == 1
+
+
 def test_manual_decisions_survive_chat(workspace):
     client, _ = workspace
     response = send(client, result([move_rule(selector={"glob": "leetcode.*"})]), files=[
