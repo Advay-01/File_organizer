@@ -4,7 +4,7 @@
 
 Sortly is a Windows desktop file organizer with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
 
-[Download 1.0.7 for Windows x64](https://github.com/Advay-01/File_organizer/releases/download/v1.0.7/Sortly_1.0.7_x64-setup.exe) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/File_organizer/issues)
+[Download 1.0.7 for Windows x64](https://github.com/Advay-01/Sortly/releases/download/v1.0.7/Sortly_1.0.7_x64-setup.exe) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
 
 ## See it work
 
