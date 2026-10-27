@@ -1,5 +1,6 @@
 """Tests for the React API bridge without contacting an LLM provider."""
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,7 +114,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result["moved"], 1)
         self.assertTrue((root / "Books" / "Science" / source.name).exists())
 
-    def test_missing_source_aborts_before_any_file_is_moved(self):
+    def test_missing_source_is_reported_while_unchanged_file_moves(self):
         first = self.root / "first.txt"
         second = self.root / "second.txt"
         first.write_text("first")
@@ -127,19 +128,19 @@ class ApiTests(unittest.TestCase):
         )
         second.unlink()
 
-        with self.assertRaises(api.HTTPException) as caught:
-            api.apply(api.ApplyRequest(
-                plan_id="stale-plan",
-                files=[
-                    api.ApplyFile(id="0", accepted=True),
-                    api.ApplyFile(id="1", accepted=True),
-                ],
-            ))
+        response = api.apply(api.ApplyRequest(
+            plan_id="stale-plan",
+            files=[
+                api.ApplyFile(id="0", accepted=True),
+                api.ApplyFile(id="1", accepted=True),
+            ],
+        ))
 
-        self.assertEqual(caught.exception.status_code, 409)
-        self.assertIn("source file is missing", str(caught.exception.detail))
-        self.assertTrue(first.exists())
-        self.assertFalse((self.root / "Docs" / "first.txt").exists())
+        payload = json.loads(response.body)
+        self.assertEqual(response.status_code, 207)
+        self.assertEqual((payload["moved"], payload["failed"]), (1, 1))
+        self.assertIn("reanalysis", payload["failures"][0]["reason"])
+        self.assertTrue((self.root / "Docs" / "first.txt").exists())
 
     def test_preview_parse_failure_is_a_readable_502(self):
         from fastapi.testclient import TestClient

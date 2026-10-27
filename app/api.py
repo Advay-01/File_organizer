@@ -41,6 +41,7 @@ from app.core.safety import (
     ScanPolicy,
     UnsafePathError,
     assert_safe_root,
+    file_identity,
     should_skip_directory,
     validate_move_paths,
 )
@@ -259,16 +260,25 @@ def _resolve_plan_source(raw_path: str, root: Path) -> Path:
             candidate = resolved_root.joinpath(*parts[1:])
         else:
             candidate = resolved_root / raw
-    return candidate.resolve(strict=False)
+    # Preserve the lexical path so Apply can still detect substituted links.
+    return candidate.absolute()
 
 
-def _validate_for_apply(plan: StoredPlan) -> None:
+def _validate_for_apply(plan: StoredPlan, allow_stale: bool = False) -> None:
     for move in plan.moves:
         if not move.selected:
             continue
         source = Path(move.src)
         destination = Path(move.dest)
+        if allow_stale:
+            try:
+                if not move.source_snapshot or file_identity(source) != move.source_snapshot.identity:
+                    continue  # Let execution report stale operations individually.
+            except OSError:
+                continue
         if not source.is_file():
+            if allow_stale:
+                continue  # The executor reports this operation and continues safely.
             raise HTTPException(
                 409,
                 f"Preview is stale because this source file is missing: {source.name}",
@@ -347,6 +357,7 @@ def _content_moves(
                 suggestion.subcategory,
                 # Already in the right place with the right name: nothing to do.
                 suggestion.selected and not _same_path(destination, current),
+                suggestion.source_snapshot,
             )
         )
     return moves
@@ -379,6 +390,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
                     original.reason,
                     original.subfolder,
                     False,
+                    original.source_snapshot,
                 )
             )
             continue
@@ -410,6 +422,7 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
                 original.reason,
                 subcategory,
                 not _same_path(destination, source),
+                original.source_snapshot,
             )
         )
     return moves
@@ -689,7 +702,7 @@ def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
         for move in plan.moves:
             move.src = str(_resolve_plan_source(move.src, plan.source))
 
-        _validate_for_apply(plan)
+        _validate_for_apply(plan, allow_stale=True)
         requested = sum(1 for move in plan.moves if move.selected)
         result = execute_plan(
             plan.moves,

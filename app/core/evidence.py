@@ -1,7 +1,6 @@
 """Structured local evidence extraction for content-first organization."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -13,6 +12,7 @@ from typing import List
 from app.core.extractor import _read_text, extract_content, extract_snippet
 from app.core.privacy import detect_sensitive, detect_suspicious_commands, redact_sensitive
 from app.models.schemas import FileInfo
+from app.core.safety import snapshot_file
 
 EVIDENCE_VERSION = 4
 
@@ -66,12 +66,8 @@ class EvidenceBundle:
 
 def content_fingerprint(path: Path) -> str | None:
     """Hash the complete file so same-size mid-file edits cannot hit stale cache data."""
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+        return snapshot_file(path).sha256
     except OSError:
         return None
 

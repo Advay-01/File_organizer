@@ -89,6 +89,12 @@ def main(argv=None) -> int:
     )
     if args.apply:
         print(f"\nMoved {len(done)} file(s). Undo with: python -m app.main {out_root} --undo")
+        for failure in done.failures:
+            print(f"Skipped {failure['file']}: {failure['reason']}")
+        if done.log_error:
+            print(done.log_error)
+        if done.failed or done.log_error:
+            return 1
     return 0
 
 

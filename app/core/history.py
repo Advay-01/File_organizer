@@ -9,7 +9,7 @@ move keeps a `restored` flag so a partly-undone run can be retried.
 Safety rules (all covered by tests):
   * never overwrites: if the original spot is taken the file stays where it is, with a reason
   * never touches files the user already deleted or moved again (reported, not failed)
-  * a tampered log cannot make undo touch files outside the output folder
+  * moves stay within the recorded source/output boundaries; legacy logs stay in output
   * folders left empty by an undo are removed, the output folder itself never is
 """
 from __future__ import annotations
@@ -199,6 +199,20 @@ def _prune_empty_dirs(start: Path, stop: Path) -> None:
         d = d.parent
 
 
+def _undo_roots(entry: dict, output_root: str) -> tuple[Path, Path]:
+    """Reverse only explicitly recorded boundaries; never infer roots from a move."""
+    output = Path(output_root).expanduser().resolve(strict=True)
+    if "source_root" not in entry and "output_root" not in entry:
+        return output, output  # Older journals only authorized moves within output.
+    source_value, output_value = entry.get("source_root"), entry.get("output_root")
+    if not all(isinstance(value, str) and Path(value).is_absolute()
+               for value in (source_value, output_value)):
+        raise UnsafePathError("Invalid recorded root boundaries.")
+    if Path(output_value).resolve(strict=True) != output:
+        raise UnsafePathError("The journal belongs to another output root.")
+    return Path(source_value), output
+
+
 # --------------------------------------------------------------------------- public API
 
 
@@ -249,11 +263,11 @@ def undo_run(output_root: str, run_id: int) -> Dict[str, object]:
         raise ValueError("this run was already undone")
 
     moves = _all_moves(entry)
-    if not any(move.get("started") or move.get("completed") for move in moves):
+    if not any(move.get("started") or move.get("completed", True) for move in moves):
         def abandon(entries: List[dict]) -> None:
             current = entries[run_id]
             current_moves = _all_moves(current)
-            if any(move.get("started") or move.get("completed") for move in current_moves):
+            if any(move.get("started") or move.get("completed", True) for move in current_moves):
                 raise UndoLogError("The interrupted run became active during recovery.")
             current["state"] = "abandoned"
             current["abandoned_at"] = datetime.now().isoformat(timespec="seconds")
@@ -278,13 +292,14 @@ def undo_run(output_root: str, run_id: int) -> Dict[str, object]:
             if not dest.exists():
                 skipped.append({"file": dest.name, "reason": "file is no longer there"})
                 continue
-            if src.exists():
+            if os.path.lexists(src):
                 skipped.append({"file": dest.name, "reason": "original location is already occupied"})
                 continue
             try:
-                validate_move_paths(dest, src, Path(output_root), Path(output_root))
-                src.parent.mkdir(parents=True, exist_ok=True)
-                move_file_no_overwrite(dest, src)
+                original_source_root, original_output_root = _undo_roots(entry, output_root)
+                validate = lambda: validate_move_paths(dest, src, original_source_root, original_output_root)
+                validate()
+                move_file_no_overwrite(dest, src, validate=validate)
             except UnsafePathError:
                 skipped.append({"file": dest.name, "reason": "the path did not pass safety checks"})
                 continue

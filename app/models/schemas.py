@@ -5,6 +5,8 @@ from typing import List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.safety import FileSnapshot
+
 
 class FileInfo(BaseModel):
     """Local facts about one file plus a short content snippet."""
@@ -16,6 +18,7 @@ class FileInfo(BaseModel):
     date_created: str
     snippet: str = ""
     warnings: List[str] = Field(default_factory=list)
+    source_snapshot: FileSnapshot | None = Field(default=None, exclude=True)
 
 
 class SortingAction(BaseModel):

@@ -17,6 +17,7 @@ from app.core.content_cache import (
 from app.core.evidence import EvidenceBundle, content_fingerprint, extract_evidence
 from app.core.planner import Move, sanitize_target_path
 from app.core.privacy import redact_sensitive
+from app.core.safety import FileSnapshot, file_identity
 from app.models.schemas import FileInfo
 from app.models.schemas import ContentIntelligenceResponse
 
@@ -93,6 +94,7 @@ class ContentSuggestion:
     extraction_status: str
     sensitive: bool = False
     selected: bool = True
+    source_snapshot: FileSnapshot | None = None
 
     @property
     def target_path(self) -> str:
@@ -556,14 +558,43 @@ def plan_content_intelligence(
     )
     try:
         for file in files:
-            fingerprint = content_fingerprint(Path(file.path)) or ""
+            if file.source_snapshot is None:
+                try:
+                    identity = file_identity(Path(file.path))
+                    fingerprint = content_fingerprint(Path(file.path)) or ""
+                    if file_identity(Path(file.path)) != identity:
+                        fingerprint = ""
+                    file.source_snapshot = FileSnapshot(fingerprint, identity)
+                except OSError:
+                    file.source_snapshot = FileSnapshot()
+            fingerprint = file.source_snapshot.sha256
+            try:
+                unchanged = bool(fingerprint) and file_identity(Path(file.path)) == file.source_snapshot.identity
+            except OSError:
+                unchanged = False
             extension = Path(file.path).suffix.lower()
-            evidence = cache.get_evidence(fingerprint, extension) if fingerprint else None
+            evidence = cache.get_evidence(fingerprint, extension) if unchanged else None
             if evidence is not None:
                 evidence = refresh_evidence_identity(evidence, file)
-            if evidence is None:
+            if not unchanged:
+                evidence = EvidenceBundle(
+                    path=file.path, fingerprint="", filename=file.filename,
+                    extension=extension, parent_directory=str(Path(file.path).parent),
+                    warnings=["Source changed during analysis; reanalysis is required."],
+                )
+            elif evidence is None:
                 evidence = extract_evidence(file, fingerprint=fingerprint)
-                if not evidence.sensitive:
+                try:
+                    unchanged = file_identity(Path(file.path)) == file.source_snapshot.identity
+                except OSError:
+                    unchanged = False
+                if not unchanged:
+                    # Never cache extracted bytes under an earlier file's digest.
+                    evidence.fingerprint = ""
+                    evidence.content = evidence.redacted_content = ""
+                    evidence.extraction_status = "unavailable"
+                    evidence.warnings.append("Source changed during analysis; reanalysis is required.")
+                elif not evidence.sensitive:
                     cache.put_evidence(evidence)
             evidence_by_path[file.path] = evidence
             key = analysis_cache_key(
@@ -658,6 +689,7 @@ def plan_content_intelligence(
             stored = analysis_by_path[file.path]
             evidence = evidence_by_path[file.path]
             suggestion = _stored_suggestion(item_id, file, evidence, stored)
+            suggestion.source_snapshot = file.source_snapshot
             suggestions.append(suggestion)
 
         return IntelligenceResult(
@@ -684,4 +716,5 @@ def suggestion_to_move(suggestion: ContentSuggestion, destination: Path) -> Move
         suggestion.reasoning,
         suggestion.subcategory,
         suggestion.selected,
+        suggestion.source_snapshot,
     )

@@ -138,6 +138,12 @@ def main(argv=None) -> int:
         runs = history.list_runs(out)
         hint = f"--undo-run {runs[0]['id']}" if runs else "--undo-last"
         print(f"\nMoved {len(done)} files. Undo with: python -m app.fast_run {out} {hint}")
+        for failure in done.failures:
+            print(f"Skipped {failure['file']}: {failure['reason']}")
+        if done.log_error:
+            print(done.log_error)
+        if done.failed or done.log_error:
+            return 1
     else:
         if a.show_all:
             execute_plan(res.moves, out, dry_run=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import errno
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,9 @@ from app.core.history import (
     update_history,
 )
 from app.core.planner import Move
-from app.core.safety import UnsafePathError, move_file_no_overwrite, validate_move_paths
+from app.core.safety import (
+    StaleSourceError, UnsafePathError, file_identity, move_file_no_overwrite, validate_move_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +92,7 @@ def execute_plan(
     output_root: str,
     dry_run: bool = True,
     source_root: str | None = None,
-) -> List[dict]:
+) -> ExecutionResult:
     """Move files through a durable per-run undo journal.
 
     A validated intent record is written before the first move. Each move marks
@@ -115,7 +118,9 @@ def execute_plan(
         result.state = "success"
         return result
 
-    approved_source = Path(source_root) if source_root else None
+    # Retain lexical roots for validation so resolving them cannot hide a junction.
+    approved_output = Path(output_root).expanduser().absolute()
+    approved_source = Path(source_root).expanduser().absolute() if source_root else approved_output
     journal_moves: list[dict] = []
     move_plan: list[tuple[Move, Path, Path, dict]] = []
     for m in selected:
@@ -123,18 +128,21 @@ def execute_plan(
         category = "/".join(part for part in (m.folder, m.subfolder) if part)
         _safe_print(f"  {src.name}  ->  {category}/{dest.name}   ({m.reason})")
         try:
-            validate_move_paths(src, dest, Path(output_root), approved_source)
-        except UnsafePathError as error:
+            if not m.source_snapshot or not m.source_snapshot.sha256 or file_identity(src) != m.source_snapshot.identity:
+                raise StaleSourceError("Source changed since analysis.")
+            validate_move_paths(src, dest, approved_output, approved_source)
+        except (StaleSourceError, FileNotFoundError):
+            result.failures.append(_failure(src.name, "source changed or is missing; reanalysis is required"))
+            continue
+        except (UnsafePathError, OSError) as error:
             logger.warning("Skipped unsafe move for %s: %s", src, error)
             result.failures.append(_failure(src.name, "the path did not pass safety checks"))
             continue
-        if not src.exists():
-            result.failures.append(_failure(src.name, "source file is missing"))
-            continue
-        if dest.exists():
+        if os.path.lexists(dest):
             result.failures.append(_failure(src.name, "destination already exists"))
             continue
-        record = {"src": str(src), "dest": str(dest), "started": False, "completed": False}
+        record = {"src": str(src.absolute()), "dest": str(dest.absolute()),
+                  "source_sha256": m.source_snapshot.sha256, "started": False, "completed": False}
         journal_moves.append(record)
         move_plan.append((m, src, dest, record))
 
@@ -147,6 +155,8 @@ def execute_plan(
         "run_id": run_key,
         "time": datetime.now().isoformat(timespec="seconds"),
         "state": "applying",
+        "source_root": str(approved_source.resolve(strict=False)),
+        "output_root": str(approved_output.resolve(strict=False)),
         "moves": journal_moves,
         "failures": list(result.failures),
     }
@@ -170,11 +180,20 @@ def execute_plan(
             break
 
         try:
-            move_file_no_overwrite(src, dest)
-        except OSError as error:
+            move_file_no_overwrite(
+                src, dest, expected_snapshot=m.source_snapshot,
+                validate=lambda: validate_move_paths(src, dest, approved_output, approved_source),
+            )
+        except (OSError, UnsafePathError) as error:
             logger.exception("Could not move %s to %s", src, dest)
             record["started"] = False
-            result.failures.append(_failure(src.name, _move_failure_reason(error)))
+            reason = (
+                "source changed or is missing; reanalysis is required"
+                if isinstance(error, (StaleSourceError, FileNotFoundError)) else
+                "the path did not pass safety checks"
+                if isinstance(error, UnsafePathError) else _move_failure_reason(error)
+            )
+            result.failures.append(_failure(src.name, reason))
             entry["failures"] = list(result.failures)
             try:
                 _update_run(output_root, entry)

@@ -1,13 +1,14 @@
 """Cache-aware wrapper around the fast planner."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
 from app.core.cache import OrganizeCache
 from app.core.fast_planner import FastConfig, plan_files_fast
 from app.core.planner import Move
+from app.core.safety import FileSnapshot, snapshot_file
 
 
 @dataclass
@@ -68,6 +69,18 @@ def plan_with_cache(
 ) -> CachedResult:
     """Reuse prior classifications and leave already-sorted files out of the plan."""
     all_files = list(files)
+    snapshots = {}
+    for file_info in all_files:
+        source = _file_path(file_info)
+        snapshot = getattr(file_info, "source_snapshot", None)
+        if snapshot is None:
+            try:
+                snapshot = snapshot_file(source)
+            except OSError:
+                snapshot = FileSnapshot()
+            if hasattr(file_info, "source_snapshot"):
+                file_info.source_snapshot = snapshot
+        snapshots[str(source)] = snapshot
     root = Path(output_root).resolve()
     if not use_cache:
         planned = plan_files_fast(all_files, str(root), models, known_folders, config, progress)
@@ -96,14 +109,14 @@ def plan_with_cache(
             result.already_organized.append(source)
             continue
         destination = _unique_destination(destination_folder / source.name, taken)
-        result.moves.append(Move(str(source), str(destination), folder, f"{reason} (cached)"))
+        result.moves.append(Move(str(source), str(destination), folder, f"{reason} (cached)",
+                                 source_snapshot=snapshots[str(source)]))
 
     if todo:
         planned = plan_files_fast(todo, str(root), models, known_folders, config, progress)
         for move in planned.moves:
             destination = _unique_destination(Path(move.dest), taken)
-            result.moves.append(Move(move.src, str(destination), move.folder, move.reason,
-                                     move.subfolder, move.selected))
+            result.moves.append(replace(move, dest=str(destination)))
         result.stats = dict(planned.stats)
         cache.put_many([(_file_path(file_info), _target(move), move.reason)
                         for file_info, move in zip(todo, planned.moves)])

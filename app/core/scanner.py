@@ -20,6 +20,7 @@ from app.core.safety import (
     is_system_path,
     resolved_inside,
     should_skip_directory,
+    snapshot_file,
 )
 
 SKIP_DIRS = {".git", ".idea", ".venv", "venv", "__pycache__", "node_modules"}
@@ -88,8 +89,7 @@ def scan_directory_with_report(
                     elif policy.recent_seconds and time.time() - st.st_mtime < policy.recent_seconds:
                         skip_reason = "recently_modified"
                     else:
-                        with p.open("rb"):
-                            pass
+                        snapshot = snapshot_file(p)
                 except (OSError, PermissionError):
                     skip_reason = "locked_or_unreadable"
             if skip_reason:
@@ -104,6 +104,7 @@ def scan_directory_with_report(
                     extension=p.suffix.lower(),
                     size_kb=round(st.st_size / 1024, 2),
                     date_created=datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d"),
+                    source_snapshot=snapshot,
                 )
             )
             if len(found) >= policy.max_files:

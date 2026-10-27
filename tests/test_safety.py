@@ -109,14 +109,7 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_unreadable_file_is_skipped(self):
         self.old_file("locked.txt")
-        original_open = Path.open
-
-        def selective(path, *args, **kwargs):
-            if path.name == "locked.txt":
-                raise PermissionError("locked")
-            return original_open(path, *args, **kwargs)
-
-        with patch("pathlib.Path.open", new=selective):
+        with patch("app.core.scanner.snapshot_file", side_effect=PermissionError("locked")):
             files, summary = scan_directory_with_report(
                 str(self.root),
                 policy=ScanPolicy(recent_seconds=0),

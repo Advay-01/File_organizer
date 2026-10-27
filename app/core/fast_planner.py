@@ -36,7 +36,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set
 from app.core import llm_http
 from app.core.classifier import extract_json, temperature_rejected
 from app.core.extractor import extract_snippet
-from app.core.planner import Move
+from app.core.planner import Move, ensure_source_snapshots
 from app.models.schemas import FileInfo
 
 AsyncCompletionFn = Callable[[str, List[dict]], Awaitable[str]]
@@ -676,6 +676,7 @@ def plan_files_fast(
     injectable for tests; by default litellm.acompletion is used."""
     if not models:
         raise ValueError("At least one model is required")
+    ensure_source_snapshots(files)
     cfg = resolve_profile(config or config_from_env(), len(files))
     t0 = time.monotonic()
     # every key the CLI/API reads must exist on EVERY path (tiny runs never enter the batch engine)
@@ -785,7 +786,7 @@ def plan_files_fast(
         reason = "unclassified" if idx in unclassified else "content match"
         if idx in new_name:
             reason += " + renamed"
-        moves.append(Move(f.path, str(dest), folder, reason))
+        moves.append(Move(f.path, str(dest), folder, reason, source_snapshot=f.source_snapshot))
 
     stats["seconds"] = round(time.monotonic() - t0, 2)
     stats["folders"] = len({m.folder for m in moves})

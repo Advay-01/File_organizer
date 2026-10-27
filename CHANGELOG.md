@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.10 - 2026-10-27
+
+### File safety and recovery
+
+- Fixed ordinary folders being rejected because an unrelated ancestor contained a standalone project manifest. Selected software projects, confirmed repository/build trees, protected directories, and embedded projects remain guarded.
+- Fixed Undo for moves between separate source and destination trees. New journals record both approved roots, and restoration validates them in reverse. Destination conflicts and partial failures are reported and can be retried without overwriting files.
+- Bound preview operations to the original file identity and full SHA-256 content fingerprint. Apply verifies each file again immediately before moving it and skips changed, replaced, or missing sources with a reanalysis message.
+- Preserved fingerprints through cached analysis, chat refinement, destination edits, and renaming. The normal analysis flow reuses the scanned fingerprint; changed extraction results cannot be cached under the old digest.
+- Rechecked paths around directory creation and final hashing, strengthened source-parent symlink/junction checks, and verified the copy fallback before removing the source.
+- Made skipped operations visible in both CLIs and the legacy GUI, including failed runs that moved no files. Existing layout, styling, AI prompts, dynamic folder generation, and privacy gates are unchanged.
+- Preserved older same-root history records. Legacy cross-root journals without approved-root metadata remain restricted because their original authorization cannot be inferred safely.
+
+### Verification and packages
+
+- Added 43 temporary-file regression cases covering project detection, cross-root undo, conflict retries, stale content, replaced files, cache reuse, path redirects, and CLI/GUI failure reporting.
+- Local Windows validation: 320 backend tests and 53 subtests passed; all 21 frontend tests passed. Native release CI repeats tests and frozen-service/desktop startup checks on Windows x64, Linux x64, and Apple Silicon macOS before publication.
+- The native package formats remain the Windows NSIS installer, Linux `.deb` and AppImage, and macOS Apple Silicon DMG, with per-platform SHA-256 manifests.
+- Detailed changes, the complete file list, and remaining filesystem/journal limitations are documented in [the safety investigation](docs/safety-fixes.md).
+
 ## 1.0.9 - 2026-10-27
 
 ### Desktop platforms

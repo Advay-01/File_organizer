@@ -241,10 +241,10 @@ class ApplySafetyTests(unittest.TestCase):
         self.plan()
         real_move = executor.move_file_no_overwrite
 
-        def fail_second(source: Path, destination: Path) -> None:
+        def fail_second(source: Path, destination: Path, **kwargs) -> None:
             if source.name == "second.txt":
                 raise PermissionError("locked by another process")
-            real_move(source, destination)
+            real_move(source, destination, **kwargs)
 
         with self.assertLogs("app.core.executor", level="ERROR") as logs:
             with patch("app.core.executor.move_file_no_overwrite", side_effect=fail_second):
@@ -314,10 +314,10 @@ class ApplySafetyTests(unittest.TestCase):
         self.plan()
         real_move = executor.move_file_no_overwrite
 
-        def fail_first(source: Path, destination: Path) -> None:
+        def fail_first(source: Path, destination: Path, **kwargs) -> None:
             if source.name == "first.txt":
                 raise PermissionError("locked")
-            real_move(source, destination)
+            real_move(source, destination, **kwargs)
 
         with self.assertLogs("app.core.executor", level="ERROR"):
             with patch("app.core.executor.move_file_no_overwrite", side_effect=fail_first):
@@ -328,19 +328,20 @@ class ApplySafetyTests(unittest.TestCase):
             api.apply(self.request())
         self.assertEqual(caught.exception.status_code, 409)
 
-    def test_stale_plan_is_rejected_before_the_second_file_moves(self):
+    def test_stale_operation_is_skipped_and_unchanged_file_moves(self):
         self.plan()
         self.second.unlink()
 
-        with self.assertRaises(api.HTTPException) as caught:
-            api.apply(self.request())
+        response = api.apply(self.request())
         with self.assertRaises(api.HTTPException) as retried:
             api.apply(self.request())
 
-        self.assertEqual(caught.exception.status_code, 409)
+        payload = self.response_json(response)
+        self.assertEqual(response.status_code, 207)
+        self.assertEqual((payload["moved"], payload["failed"]), (1, 1))
+        self.assertIn("reanalysis", payload["failures"][0]["reason"])
         self.assertEqual(retried.exception.status_code, 409)
-        self.assertTrue(self.first.is_file())
-        self.assertFalse((self.root / "Docs").exists())
+        self.assertTrue((self.root / "Docs" / "Notes" / "first.txt").is_file())
 
 
 class ApiErrorBoundaryTests(unittest.TestCase):

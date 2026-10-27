@@ -16,7 +16,7 @@ from typing import Callable, List, Optional
 from dotenv import load_dotenv
 
 from app.core.classifier import LLMClassifier
-from app.core.executor import execute_plan
+from app.core.executor import ExecutionResult, execute_plan
 from app.core.extractor import attach_snippets
 from app.core.planner import Move, build_plan
 from app.core.scanner import scan_directory
@@ -207,7 +207,21 @@ class OrganizerApp(tk.Tk):
                     self.status_var.set("Could not complete the request.")
                     messagebox.showerror("Could not organize files", str(value))
                     continue
-                if isinstance(value, list) and (not value or isinstance(value[0], Move)):
+                if isinstance(value, ExecutionResult):
+                    self._clear_plan()
+                    summary = f"Organized {value.moved} file(s)."
+                    if value.failures or value.log_error:
+                        details = "\n".join(
+                            f"Skipped {item['file']}: {item['reason']}" for item in value.failures
+                        )
+                        self.status_var.set(summary + " Create a new preview for skipped files.")
+                        messagebox.showwarning("Organization incomplete", "\n".join(
+                            part for part in (summary, details, value.log_error) if part
+                        ))
+                    else:
+                        self.status_var.set(summary + " Use the CLI undo command if needed.")
+                        messagebox.showinfo("Finished", summary)
+                elif isinstance(value, list) and (not value or isinstance(value[0], Move)):
                     self._show_plan(value)
                 else:
                     moved = len(value)

@@ -4,11 +4,11 @@
 
 Sortly is a desktop file organizer for Windows, Linux, and macOS with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
 
-[Download Sortly 1.0.9](https://github.com/Advay-01/Sortly/releases/tag/v1.0.9) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
+[Download Sortly 1.0.10](https://github.com/Advay-01/Sortly/releases/tag/v1.0.10) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
 
 | Your system | Download |
 | --- | --- |
-| Windows x64 | `Sortly_1.0.9_x64-setup.exe` |
+| Windows x64 | `Sortly_1.0.10_x64-setup.exe` |
 | Linux x64 | `.deb` for Debian/Ubuntu, or `.AppImage` |
 | macOS Apple Silicon | `_aarch64.dmg` |
 
@@ -145,7 +145,7 @@ Outputs:
 
 ```text
 src-tauri/target/release/sortly.exe
-src-tauri/target/release/bundle/nsis/Sortly_1.0.9_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Sortly_1.0.10_x64-setup.exe
 ```
 
 The installer is currently unsigned. Provider credentials and local sample folders are not bundled. A packaged app can also load an external `sortly.env` or a file specified by `SORTLY_ENV_FILE`.

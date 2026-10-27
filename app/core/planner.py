@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from app.core.classifier import LLMClassifier
 from app.models.schemas import FileInfo
+from app.core.safety import FileSnapshot, snapshot_file
 
 SYSTEM_PROMPT = """You are a smart file-system architect. Look at each file's name, format, and content, then generate a dynamic two-tier folder structure (Category/Subcategory) to organize it.
 You get existing topic folders, their existing subfolders, and files (filename, extension, and a content snippet).
@@ -71,6 +72,25 @@ class Move:
     reason: str
     subfolder: str = ""
     selected: bool = True
+    source_snapshot: FileSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        # Also protect callers constructing a Move directly (CLI, extensions).
+        if self.source_snapshot is None:
+            try:
+                self.source_snapshot = snapshot_file(Path(self.src))
+            except OSError:
+                self.source_snapshot = FileSnapshot()
+
+
+def ensure_source_snapshots(files: List[FileInfo]) -> None:
+    """Bind unscanned inputs before extraction or model calls, never after them."""
+    for file in files:
+        if file.source_snapshot is None:
+            try:
+                file.source_snapshot = snapshot_file(Path(file.path))
+            except OSError:
+                file.source_snapshot = FileSnapshot()
 
 
 def _batches(files: List[FileInfo], size: int) -> List[List[FileInfo]]:
@@ -85,6 +105,7 @@ def build_plan(
     known_folders: Optional[List[str]] = None,
 ) -> List[Move]:
     """Ask the LLM batch by batch, validate, and resolve name collisions."""
+    ensure_source_snapshots(files)
     folders: List[str] = list(known_folders or [])
     by_path: Dict[str, FileInfo] = {f.path: f for f in files}
     chosen: Dict[str, Move] = {}
@@ -130,14 +151,16 @@ def build_plan(
             destination_folder = root / folder / subfolder if subfolder else root / folder
             dest = _unique(destination_folder / name, taken)
             taken.add(str(dest))
-            chosen[a.path] = Move(a.path, str(dest), folder, a.reasoning or a.reason, subfolder)
+            chosen[a.path] = Move(a.path, str(dest), folder, a.reasoning or a.reason, subfolder,
+                                  source_snapshot=f.source_snapshot)
 
     # Anything the model skipped goes to Misc rather than being left behind.
     for f in files:
         if f.path not in chosen:
             dest = _unique(root / "Misc" / f.filename, taken)
             taken.add(str(dest))
-            chosen[f.path] = Move(f.path, str(dest), "Misc", "not classified by model")
+            chosen[f.path] = Move(f.path, str(dest), "Misc", "not classified by model",
+                                  source_snapshot=f.source_snapshot)
 
     return [chosen[f.path] for f in files]
 
