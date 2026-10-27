@@ -169,6 +169,8 @@ Linux outputs are in `src-tauri/target/release/bundle/deb/` and `appimage/`. mac
 
 The **Desktop release** GitHub Actions workflow builds Windows x64, Ubuntu 22.04 x64, Apple Silicon, and Intel macOS independently. It runs backend and frontend tests, frozen-API regressions with a local fixture provider, and native desktop/API startup checks before collecting installers and checksums. It runs on the release branch or can be started manually. A manual run against a matching `vX.Y.Z` tag publishes only after every platform passes.
 
+The **Publish verified installers** workflow can instead reuse successful build artifacts. Run it against a release tag with the Windows, Linux and macOS build run IDs. It checks that all four native jobs passed, that their application source matches the tag, and that every installer matches its checksum before publishing. Documentation and CI-only changes do not require rebuilding the apps.
+
 Mac builds currently have ad-hoc signatures. Developer ID signing and Apple notarization require separate credentials; see [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/). The CI test keychain contains generated fixture credentials only and is not shipped.
 
 ### Test
