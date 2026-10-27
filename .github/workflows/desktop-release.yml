@@ -15,8 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: linux-x64
-            os: ubuntu-22.04
+          - platform: macos-arm64
+            os: macos-15
+          - platform: macos-x64
+            os: macos-15-intel
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -45,6 +47,7 @@ jobs:
         with:
           workspaces: src-tauri
           key: ${{ matrix.platform }}
+          cache-on-failure: true
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: |
