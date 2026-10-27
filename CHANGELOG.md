@@ -16,6 +16,8 @@
 ### Verification
 
 - 261 backend tests and 53 subtests passed, including an eight-file batch with a blank subcategory on its eighth file, whitespace-only values, and strict rejection of invalid decision fields.
+- The frozen API also passed the blank-subcategory regression, sensitive-file exclusion, long-name shortening, chat schema repair, two confirmed moves, a no-op rerun, and Undo with every original content hash restored. This check used a local fixture provider and generated sample files.
+- Extracted the final installer and verified that its API executable matches the tested build. The desktop reports version 1.0.8 and passed real Tauri IPC, API startup, empty-folder analysis, and Settings checks without replacing the existing installation.
 
 ## 1.0.7 - 2026-10-27
 
