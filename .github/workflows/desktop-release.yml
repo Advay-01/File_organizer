@@ -17,12 +17,6 @@ jobs:
         include:
           - platform: linux-x64
             os: ubuntu-22.04
-          - platform: macos-arm64
-            os: macos-15
-          - platform: macos-x64
-            os: macos-15-intel
-          - platform: windows-x64
-            os: windows-2022
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -54,6 +48,7 @@ jobs:
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb xdg-utils gnome-keyring dbus-x11
       - name: Isolated macOS test keychain
@@ -95,6 +90,7 @@ jobs:
         run: |
           sudo dpkg -i src-tauri/target/release/bundle/deb/*.deb
           xvfb-run -a python scripts/smoke-desktop.py --executable /usr/bin/sortly --output build/desktop-smoke.json
+          xvfb-run -a python scripts/smoke-desktop.py --executable src-tauri/target/release/bundle/appimage/*.AppImage --output build/appimage-smoke.json
       - name: macOS bundled desktop smoke
         if: runner.os == 'macOS'
         run: |
