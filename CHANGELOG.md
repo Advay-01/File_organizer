@@ -8,7 +8,9 @@
 - Added a native GitHub Actions build matrix with isolated backend/frontend tests, frozen service regressions, desktop startup checks, and per-platform SHA-256 manifests. Platform packages are built on their native OS and architecture.
 - Removed the Windows-only `.exe` assumption when launching the bundled service. Open folder now selects Explorer, macOS Finder's `open`, or Linux `xdg-open`, without invoking a shell.
 - Added macOS Keychain and Linux Secret Service storage for the encryption key protecting provider credentials. Windows DPAPI is retained. A locked or unavailable secure store fails closed; there is no plaintext fallback. Environment-based provider keys and Ollama remain supported.
-- Added OS-neutral provider and appearance wording and platform build instructions. Classification, scanning, privacy detection, Apply, and Undo algorithms are unchanged.
+- Added OS-neutral provider and appearance wording and platform build instructions. Classification, scanning, and privacy detection are unchanged.
+- Fixed safety validation of equivalent system path aliases, including macOS `/var` versus `/private/var` and Windows short versus long paths. Nested symlinks and junctions remain rejected.
+- Preserved no-overwrite behavior on POSIX using exclusive native rename operations and an exclusive-copy fallback for unsupported filesystems. Windows keeps its existing non-replacing rename behavior; the existing Apply/Undo journal remains in use.
 
 ### Interface fixes
 

@@ -55,8 +55,9 @@ class ConfigurationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 env_file = Path(directory) / "sidecar.env"
                 env_file.write_text(f"{key}=from-file\n", encoding="utf-8")
-                desktop_server._load_env_file(env_file)
-                self.assertEqual(os.environ[key], "from-file")
+                with patch.dict(os.environ, {"PYTHON_DOTENV_DISABLED": "0"}):
+                    desktop_server._load_env_file(env_file)
+                    self.assertEqual(os.environ[key], "from-file")
         finally:
             os.environ.pop(key, None)
 
