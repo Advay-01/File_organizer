@@ -340,23 +340,33 @@ async function main() {
       await page.setViewportSize({ width: 390, height: 740 });
       await page.getByRole('textbox', { name: 'Folder directory' }).fill(source);
       state.previewMode = 'slow';
-      state.previewDelay = 3000;
+      state.previewDelay = 6000;
       await page.getByRole('button', { name: 'Analyze folder', exact: true }).click();
       const activity = page.getByRole('status', { name: 'Analyzing folder', exact: true });
       await activity.waitFor({ state: 'visible' });
       assert.notEqual(await page.getByRole('button', { name: 'Cancel analysis', exact: true }).evaluate((node) => getComputedStyle(node).backgroundImage), 'none');
       assert.equal(await page.getByText('Scanning and analyzing…', { exact: true }).count(), 0);
       const lightBar = page.locator('.analysis-light-bar');
-      const barBox = await lightBar.boundingBox();
-      const askBox = await page.getByRole('region', { name: 'Ask Sortly', exact: true }).boundingBox();
-      assert.equal(barBox.width, 160);
-      assert.equal(barBox.height, 16);
-      assert.ok(barBox.y > askBox.y + askBox.height && barBox.y - (askBox.y + askBox.height) < 24);
-      const wave = page.locator('.analysis-light-wave');
-      assert.equal(await wave.evaluate((node) => getComputedStyle(node).animationName), 'analysis-light-wave');
+      for (const width of [390, 1180]) {
+        await page.setViewportSize({ width, height: 740 });
+        const barBox = await lightBar.boundingBox();
+        const askBox = await page.getByRole('region', { name: 'Ask Sortly', exact: true }).boundingBox();
+        assert.ok(Math.abs(barBox.width - askBox.width) < 1);
+        assert.ok(Math.abs(barBox.x - askBox.x) < 1);
+        assert.equal(barBox.height, 2);
+        assert.ok(barBox.y > askBox.y + askBox.height && barBox.y - (askBox.y + askBox.height) < 24);
+      }
+      const beam = page.locator('.analysis-light-beam');
+      assert.equal(await beam.evaluate((node) => getComputedStyle(node).animationName), 'analysis-light-travel');
+      await beam.evaluate((node) => { const animation = node.getAnimations()[0]; animation.pause(); animation.currentTime = 350; });
+      const start = await beam.boundingBox();
+      await beam.evaluate((node) => { node.getAnimations()[0].currentTime = 950; });
+      const end = await beam.boundingBox();
+      assert.ok(end.x > start.x, 'Light travels from left to right');
+      assert.equal(end.y, start.y, 'Light stays on a straight horizontal line');
       await page.screenshot({ path: path.join(output, 'analysis-activity.png'), fullPage: true });
       await page.emulateMedia({ reducedMotion: 'reduce' });
-      assert.equal(await wave.evaluate((node) => getComputedStyle(node).animationName), 'none');
+      assert.equal(await beam.evaluate((node) => getComputedStyle(node).animationName), 'none');
       await page.getByRole('button', { name: 'Cancel analysis', exact: true }).click();
       assert.equal(await activity.count(), 0);
       assert.equal(state.applied, 0);
@@ -428,6 +438,25 @@ async function main() {
       await row.getByRole('checkbox', { name: 'Include draft.txt', exact: true }).uncheck();
       assert.equal(await row.getByText('Stays in source', { exact: true }).isVisible(), true);
       assert.equal(state.applied, 0);
+      const expandedGroups = page.locator('.review-group-toggle[aria-expanded="true"]');
+      while (await expandedGroups.count()) await expandedGroups.first().click();
+      for (const width of [1180, 870, 427, 320]) {
+        await page.setViewportSize({ width, height: 740 });
+        const headers = page.locator('.review-group-header');
+        let rightEdge;
+        for (const header of await headers.all()) {
+          await header.scrollIntoViewIfNeeded();
+          const title = await header.locator('.review-group-toggle').boundingBox();
+          const control = await header.getByRole('switch').boundingBox();
+          const right = control.x + control.width;
+          if (rightEdge !== undefined) assert.ok(Math.abs(right - rightEdge) < 1, 'Group switches share the same right edge');
+          rightEdge = right;
+          assert.ok(control.x >= title.x + title.width, 'Switch does not overlap the folder label');
+          assert.ok(Math.abs(control.y + control.height / 2 - title.y - title.height / 2) < 1, 'Switch stays beside the folder label');
+        }
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        if (width === 427) await page.screenshot({ path: path.join(output, 'review-toggles-mobile.png'), fullPage: true });
+      }
     });
     await scenario('a different folder starts a fresh chat without replaying old instructions', async ({ page, state }) => {
       await page.getByRole('button', { name: 'Browse', exact: true }).click();

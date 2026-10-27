@@ -110,14 +110,20 @@
 }
 .sortly-workspace .sortly-analyze-button:enabled:hover { background: var(--analyze-gradient); background-size: 400% 100%; filter: brightness(1.02); }
 .sortly-workspace .sortly-analyze-button[data-analyzing="true"] { animation-play-state: paused; }
-.analysis-activity { display: grid; place-items: center; height: 1rem; margin-top: -.375rem; }
+.analysis-activity { display: grid; place-items: center; width: 100%; height: 1rem; margin-top: -.375rem; }
 .analysis-light-bar {
-  display: block; width: 10rem; height: 1rem; overflow: hidden; color: var(--text-primary);
-  mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
-  filter: drop-shadow(0 0 3px var(--focus-halo));
+  position: relative; display: block; width: 100%; height: 2px; overflow: hidden;
+  border-radius: 999px; color: var(--text-primary);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 2%, #000 98%, transparent);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, currentColor 45%, transparent));
 }
-.analysis-light-wave { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; animation: analysis-light-wave 2.2s linear infinite; }
-@keyframes analysis-light-wave { to { transform: translateX(-80px); } }
+.analysis-light-beam {
+  position: absolute; inset: 0 auto 0 0; width: 32%; border-radius: inherit;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, currentColor 20%, transparent) 40%, currentColor 90%, transparent);
+  animation: analysis-light-travel 1.7s linear infinite;
+}
+@keyframes analysis-light-travel { from { transform: translateX(-100%); } to { transform: translateX(312.5%); } }
 @media (max-width: 600px) {
   .sortly-workspace .sortly-analyze-button { width: 2.75rem; padding: 0; }
 }
@@ -126,12 +132,14 @@
 @keyframes sortly-analyze-colors { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
 @media (max-width: 480px) { .ask-newline-hint { display: none; } .ask-sortly-content { padding-inline: .875rem; } }
 @media (prefers-reduced-motion: reduce) {
-  .sortly-workspace .sortly-analyze-button, .chat-dots i, .chat-text-caret, .analysis-light-wave { animation: none; }
+  .sortly-workspace .sortly-analyze-button, .chat-dots i, .chat-text-caret, .analysis-light-beam { animation: none; }
+  .analysis-light-beam { left: 34%; }
 }
 @media (forced-colors: active) {
   .sortly-workspace .sortly-analyze-button, .sortly-workspace .ask-sortly-send { border: 1px solid ButtonText; background: ButtonFace; color: ButtonText; }
   .sortly-workspace .ask-sortly:focus-within { border-color: Highlight; }
   .analysis-light-bar { color: CanvasText; filter: none; mask-image: none; }
+  .analysis-light-beam { background: CanvasText; }
 }
 
 /*
@@ -999,7 +1007,8 @@ button:disabled {
   }
 
   .review-group-header {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: var(--space-xs);
     padding: var(--space-2xs) var(--space-md);
@@ -1007,6 +1016,8 @@ button:disabled {
 
   .review-group-toggle {
     display: flex;
+    grid-column: 1;
+    grid-row: 1;
     min-width: 0;
     flex: 1 1 auto;
     align-items: center;
@@ -1055,11 +1066,19 @@ button:disabled {
 
   .review-group-meta {
     display: flex;
+    grid-column: 2;
+    grid-row: 1;
     flex: 0 0 auto;
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: var(--space-2xs);
+  }
+
+  .review-group-selection {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
   }
 
   .review-group-flag {
@@ -2362,14 +2381,19 @@ button:disabled {
   }
 
   .review-group-header {
-    align-items: flex-start;
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 0;
   }
 
   .review-group-meta {
-    width: 100%;
+    grid-column: 1;
+    grid-row: 2;
     justify-content: flex-start;
-    padding-left: 1.6rem;
+    padding: 0 0 .45rem 2.65rem;
+  }
+
+  .review-group-selection {
+    grid-column: 2;
   }
 
   .review-group-files {

@@ -259,8 +259,8 @@ export default function ProviderStudio({ open, onOpenChange, apiBase, presentati
             ? <h2 id="provider-configuration-heading" className="font-display text-lg font-semibold tracking-tight">Provider configuration</h2>
             : <Dialog.Title className="font-display text-xl font-semibold tracking-tight">Provider Studio</Dialog.Title>}
           {presentation === "page"
-            ? <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the exact provider and model used by Analyze. Credentials stay in the Python backend and are encrypted with Windows DPAPI.</p>
-            : <Dialog.Description className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the exact provider and model used by Analyze. Credentials stay in the Python backend and are encrypted with Windows DPAPI.</Dialog.Description>}
+            ? <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the provider and model used by Analyze. API keys stay private and use your system’s secure credential storage.</p>
+            : <Dialog.Description className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-soft">Choose the provider and model used by Analyze. API keys stay private and use your system’s secure credential storage.</Dialog.Description>}
         </div>
         <div className="provider-heading-actions">
           {!loading && savedConfig && (

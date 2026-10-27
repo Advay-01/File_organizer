@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -17,6 +18,8 @@ hiddenimports = (
     + collect_submodules("litellm")
 )
 datas = collect_data_files("litellm")
+if sys.platform != "win32":
+    hiddenimports += collect_submodules("keyring.backends.macOS" if sys.platform == "darwin" else "keyring.backends.SecretService")
 
 a = Analysis(
     [str(PROJECT_ROOT / "app" / "desktop_server.py")],

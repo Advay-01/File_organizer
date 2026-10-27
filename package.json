@@ -1,7 +1,7 @@
 {
   "name": "sortly-desktop",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.9",
   "scripts": {
     "frontend:build": "npm --prefix frontend run build",
     "rust:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-rust.ps1",

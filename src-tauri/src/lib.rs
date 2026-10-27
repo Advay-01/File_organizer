@@ -18,7 +18,10 @@ use tauri_plugin_shell::{
 };
 use uuid::Uuid;
 
+#[cfg(target_os = "windows")]
 const SIDECAR_RELATIVE_PATH: &str = "binaries/sortly-api/sortly-api.exe";
+#[cfg(not(target_os = "windows"))]
+const SIDECAR_RELATIVE_PATH: &str = "binaries/sortly-api/sortly-api";
 const SHUTDOWN_TOKEN_ENV: &str = "SORTLY_SHUTDOWN_TOKEN";
 const MAX_PORT_ATTEMPTS: u8 = 6;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(75);

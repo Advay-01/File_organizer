@@ -11,3 +11,4 @@ pillow-heif
 rarfile
 fastapi
 uvicorn[standard]
+keyring>=25.6; sys_platform != "win32"

@@ -782,21 +782,21 @@ export default function App() {
                                 </span>
                               </span>
                             </button>
-                            <div className="review-group-meta">
+                            {(groupSummary.security > 0 || groupSummary.attention > 0) && <div className="review-group-meta">
                               {groupSummary.security > 0 && <span className="review-group-flag" data-tone="security">{groupSummary.security} sensitive</span>}
                               {groupSummary.attention > 0 && <span className="review-group-flag" data-tone="attention">{groupSummary.attention} to check</span>}
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={selected}
-                                aria-label={`Include all files in ${target}`}
-                                onClick={() => toggleTarget(target)}
-                                className="ui-switch"
-                                data-checked={selected}
-                              >
-                                <span className="ui-switch-thumb" />
-                              </button>
-                            </div>
+                            </div>}
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={selected}
+                              aria-label={`Include all files in ${target}`}
+                              onClick={() => toggleTarget(target)}
+                              className="ui-switch review-group-selection"
+                              data-checked={selected}
+                            >
+                              <span className="ui-switch-thumb" />
+                            </button>
                           </div>
                           {expanded && (
                             <div id={panelId} className="review-group-files">
@@ -972,7 +972,7 @@ function SettingsPanel({
   onChange: (preference: ThemePreference) => void;
 }) {
   const themes = [
-    { id: "system", label: "System", description: "Follow the Windows app theme.", icon: Monitor },
+    { id: "system", label: "System", description: "Follow your system theme.", icon: Monitor },
     { id: "dark", label: "Dark", description: "Use the graphite workspace.", icon: Moon },
     { id: "light", label: "Light", description: "Use the lighter workspace.", icon: Sun },
   ] as const;
@@ -987,7 +987,7 @@ function SettingsPanel({
             <div className="flex items-center gap-2 text-ink"><ActiveThemeIcon size={17} className="text-accent-text" /><h2 id="appearance-heading" className="font-display text-lg font-semibold tracking-tight">Appearance</h2></div>
             <span className="settings-current"><Check size={12} /> Active: {activeTheme.label}</span>
           </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">System follows Windows automatically. Explicit themes are saved for this desktop app only.</p>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">System follows your device automatically. Explicit themes are saved for this desktop app only.</p>
         </div>
         <div className="grid gap-3 p-6 lg:grid-cols-3" role="radiogroup" aria-label="App theme">
           {themes.map((theme) => {
@@ -1022,7 +1022,7 @@ function SettingsPanel({
         </div>
         <p className="settings-current-note" aria-live="polite">
           {preference === "system"
-            ? "Sortly is following the current Windows app theme."
+            ? "Sortly is following your current system theme."
             : `Sortly is using the ${activeTheme.label.toLowerCase()} theme on this device.`}
         </p>
       </section>
@@ -1033,7 +1033,7 @@ function SettingsPanel({
           <div>
             <h2 className="text-sm font-semibold text-ink">Local behavior</h2>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-ink-muted">
-              Reduced motion and increased contrast continue to follow Windows accessibility settings. Sortly does not yet expose controls for indexing, shortcuts, or notifications, so none are shown here.
+              Reduced motion and increased contrast continue to follow your system accessibility settings. Sortly does not yet expose controls for indexing, shortcuts, or notifications, so none are shown here.
             </p>
           </div>
         </div>

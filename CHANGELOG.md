@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.9 - 2026-10-27
+
+### Desktop platforms
+
+- Added native Linux x64 `.deb` and AppImage packaging, plus separate Apple Silicon and Intel macOS DMGs. The Windows x64 NSIS installer remains available.
+- Added a native GitHub Actions build matrix with isolated backend/frontend tests, frozen service regressions, desktop startup checks, and per-platform SHA-256 manifests. Platform packages are built on their native OS and architecture.
+- Removed the Windows-only `.exe` assumption when launching the bundled service. Open folder now selects Explorer, macOS Finder's `open`, or Linux `xdg-open`, without invoking a shell.
+- Added macOS Keychain and Linux Secret Service storage for the encryption key protecting provider credentials. Windows DPAPI is retained. A locked or unavailable secure store fails closed; there is no plaintext fallback. Environment-based provider keys and Ollama remain supported.
+- Added OS-neutral provider and appearance wording and platform build instructions. Classification, scanning, privacy detection, Apply, and Undo algorithms are unchanged.
+
+### Interface fixes
+
+- The analysis indicator spans the Ask Sortly window and shows a thin light with a bright leading edge travelling straight from left to right. Reduced-motion mode keeps it static.
+- Folder inclusion switches stay aligned on the right. On narrow screens warning badges sit under the folder label instead of pushing the switch onto a separate line. Alignment is checked from 320px through desktop widths.
+
+### Distribution notes
+
+- macOS packages use ad-hoc signatures and are not Apple notarized. Windows installers remain unsigned. The macOS build targets 13 or newer; Linux packages use Ubuntu 22.04 as their build baseline.
+- Desktop API credentials, sample files, and CI test keychains are not bundled. New keyring dependencies are limited to non-Windows platforms; no embedding or scientific runtime is added.
+
 ## 1.0.8 - 2026-10-27
 
 ### Fixed
