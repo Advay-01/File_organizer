@@ -13,7 +13,7 @@ from app.core.evidence import EvidenceBundle
 from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 DEFAULT_DB = Path(os.environ.get("ORGANIZER_CACHE_DB", Path.home() / ".file_organizer" / "cache.db"))
 
 

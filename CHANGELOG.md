@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.8 - 2026-10-27
+
+### Fixed
+
+- An explicitly empty or whitespace-only model subcategory now uses the planner's existing `General` fallback instead of rejecting the entire batch. This fixes DeepSeek replies containing `subcategory: ""`, including the reported eighth file in a batch.
+- Missing subcategories, null values, invalid types, invalid confidence values, and unknown or duplicate file IDs remain rejected. This does not bypass review, privacy checks, or confirmation.
+- The classification prompt explicitly requests a non-empty subcategory, and the analysis cache version advances so previous cached decisions are refreshed.
+
+### Packaging
+
+- Rebuilt the Windows installer as **1.0.8** after the 1.0.7 release had already published. The complete UI, chat, privacy and rerun improvements are documented in the 1.0.7 entry below.
+- Updated version metadata, the README download link, and supported-version documentation. The recorded 1.0.7 working demo remains applicable.
+
+### Verification
+
+- 261 backend tests and 53 subtests passed, including an eight-file batch with a blank subcategory on its eighth file, whitespace-only values, and strict rejection of invalid decision fields.
+
 ## 1.0.7 - 2026-10-27
 
 This release brings the chat and privacy branch into the desktop release, replaces the setup-heavy workspace with a compact interface, and fixes repeated-run filename changes. The release version intentionally advances from 0.1.6 to 1.0.7.

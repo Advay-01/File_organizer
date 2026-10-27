@@ -83,6 +83,8 @@ class ModelFallbackTests(unittest.TestCase):
         for changes in (
             {'confidence': 'certain'},
             {'category': ''},
+            {'subcategory': None},
+            {'subcategory': 42},
             {'id': 99},
         ):
             payload = json.loads(GOOD)
@@ -91,6 +93,39 @@ class ModelFallbackTests(unittest.TestCase):
                 raw, calls = self.run_call({MODELS[0]: json.dumps(payload), MODELS[1]: GOOD})
                 self.assertEqual(raw, GOOD)
                 self.assertEqual(calls, MODELS)
+
+    def test_blank_subcategory_does_not_discard_the_batch(self):
+        for blank in ('', '   ', '\t\n'):
+            payload = {'files': [dict(json.loads(GOOD)['files'][0], id=i) for i in range(8)]}
+            payload['files'][7]['subcategory'] = blank
+            with self.subTest(blank=repr(blank)):
+                reply = json.dumps(payload)
+                raw, calls = self.run_call(
+                    {MODELS[0]: reply, MODELS[1]: 'never called'}, set(range(8))
+                )
+                parsed = ci._parse_response(raw, set(range(8)))
+                self.assertEqual(calls, [MODELS[0]])
+                self.assertEqual(len(parsed), 8)
+                self.assertEqual(parsed[7]['subcategory'], 'General')
+                self.assertTrue(all(parsed[i]['subcategory'] == 'Lecture Notes' for i in range(7)))
+
+    def test_blank_subcategory_uses_existing_planner_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'notes.txt'
+            source.write_text('gradient descent trains a neural network', encoding='utf-8')
+            info = FileInfo(path=str(source), filename=source.name, extension='.txt',
+                            size_kb=1, date_created='2026-01-01')
+            payload = json.loads(GOOD)
+            payload['files'][0]['subcategory'] = ''
+            fake, calls = scripted({MODELS[0]: json.dumps(payload)})
+            with mock.patch.object(llm_http, 'direct_call_sync', fake):
+                result = ci.plan_content_intelligence(
+                    [info], str(root), MODELS, use_cache=False
+                )
+            self.assertEqual(calls, [MODELS[0]])
+            self.assertEqual(result.suggestions[0].target_path, 'AI/General')
+            self.assertTrue(source.exists())
 
     def test_missing_required_field_with_annotations_is_still_rejected(self):
         payload = json.loads(GOOD)

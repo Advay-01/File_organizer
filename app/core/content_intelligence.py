@@ -51,6 +51,7 @@ Return ONLY JSON:
 Rules:
 - Use only the JSON keys shown above. Put classification evidence in evidence_quote.
 - category must be a broad subject; subcategory should be reusable and concise.
+- Never leave subcategory blank. Use General if no more specific subcategory fits.
 - reuse a folder from existing_folders (written Category/Subcategory, or one name) whenever it
   fits; never invent a near-duplicate of an existing name (for example Technology when Software
   already exists, or Sales Data next to Revenue Reports).

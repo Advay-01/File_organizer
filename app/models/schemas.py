@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import List, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FileInfo(BaseModel):
@@ -57,6 +57,15 @@ class ContentIntelligenceAction(BaseModel):
     filename_conflict: Literal["none", "generic", "misleading", "extension_mismatch"] = "none"
     suggested_name: str = Field(default="", max_length=200)
     name_evidence: str = Field(default="", max_length=500)
+
+    @field_validator("subcategory", mode="before")
+    @classmethod
+    def normalize_blank_subcategory(cls, value):
+        # The planner already uses General for an explicitly blank subfolder.
+        # Keep missing fields, nulls, and other invalid types subject to validation.
+        if isinstance(value, str) and not value.strip():
+            return "General"
+        return value
 
 
 class ContentIntelligenceResponse(BaseModel):
