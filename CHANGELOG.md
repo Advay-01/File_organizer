@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.9 - 2026-10-27
+
+### Desktop platforms
+
+- Added native Linux x64 `.deb` and AppImage packaging, plus an Apple Silicon macOS DMG. The Windows x64 NSIS installer remains available. Intel Mac installers are not included.
+- Added a native GitHub Actions build matrix with isolated backend/frontend tests, frozen service regressions, desktop startup checks, and per-platform SHA-256 manifests. Platform packages are built on their native OS and architecture.
+- Removed the Windows-only `.exe` assumption when launching the bundled service. Open folder now selects Explorer, macOS Finder's `open`, or Linux `xdg-open`, without invoking a shell.
+- Added macOS Keychain and Linux Secret Service storage for the encryption key protecting provider credentials. Windows DPAPI is retained. A locked or unavailable secure store fails closed; there is no plaintext fallback. Environment-based provider keys and Ollama remain supported.
+- Added OS-neutral provider and appearance wording and platform build instructions. Classification, scanning, and privacy detection are unchanged.
+- Fixed safety validation of equivalent system path aliases, including macOS `/var` versus `/private/var` and Windows short versus long paths. Nested symlinks and junctions remain rejected.
+- Preserved no-overwrite behavior on POSIX using exclusive native rename operations and an exclusive-copy fallback for unsupported filesystems. Windows keeps its existing non-replacing rename behavior; the existing Apply/Undo journal remains in use.
+
+### Interface fixes
+
+- The analysis indicator spans the Ask Sortly window and shows a thin light with a bright leading edge travelling straight from left to right. Reduced-motion mode keeps it static.
+- Folder inclusion switches stay aligned on the right. On narrow screens warning badges sit under the folder label instead of pushing the switch onto a separate line. Alignment is checked from 320px through desktop widths.
+
+### Distribution notes
+
+- macOS packages use ad-hoc signatures and are not Apple notarized. Windows installers remain unsigned. The macOS build targets 13 or newer; Linux packages use Ubuntu 22.04 as their build baseline.
+- Desktop API credentials, sample files, and CI test keychains are not bundled. New keyring dependencies are limited to non-Windows platforms; no embedding or scientific runtime is added.
+
+### Verification
+
+- Windows: 277 backend tests and 53 subtests passed. Linux and Apple Silicon: 273 backend tests and 53 subtests passed, with four Windows-specific tests skipped on each.
+- All three targets passed 21 frontend tests and three Rust startup tests. The updated review and analysis indicator also passed all 10 local browser scenarios.
+- Every native frozen service passed secure credential storage, blank subcategories, privacy exclusion, long-name shortening, chat schema repair, confirmed moves, no-op reruns, and Undo with all sample hashes restored. Only local fixture providers and generated files were used.
+- Verified desktop startup and bundled API health on Windows, the installed Linux `.deb`, Linux AppImage, and the Apple Silicon `.app`. The Mac bundle also passed strict recursive signature verification.
+
 ## 1.0.8 - 2026-10-27
 
 ### Fixed

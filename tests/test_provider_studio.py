@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -34,6 +35,15 @@ KEY_ENV_VARS = (
 
 class ProviderStoreTests(unittest.TestCase):
     def setUp(self):
+        if sys.platform != 'win32':
+            from unittest.mock import MagicMock
+            secrets = {}
+            backend = MagicMock()
+            backend.get_password.side_effect = lambda service, account: secrets.get((service, account))
+            backend.set_password.side_effect = lambda service, account, value: secrets.__setitem__((service, account), value)
+            replacement = patch.object(provider_store, '_native_keyring', return_value=backend)
+            replacement.start()
+            self.addCleanup(replacement.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.saved_environment = {
             name: os.environ.get(name) for name in (*KEY_ENV_VARS, "ORGANIZER_HOME")

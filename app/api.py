@@ -284,6 +284,7 @@ def _validate_for_apply(plan: StoredPlan) -> None:
 
 
 def _hierarchy(root: Path, moves: List[dict]) -> dict:
+    root = root.resolve()
     tree = {"name": root.name or str(root), "files": [], "folders": {}}
     for move in moves:
         destination = Path(move["dest"]).resolve()
@@ -763,9 +764,10 @@ def open_folder(request: UndoRequest) -> dict:
     if not source.is_dir():
         raise HTTPException(400, "Choose an existing folder.")
     try:
-        subprocess.Popen(["explorer.exe", str(source)])
+        opener = "explorer.exe" if sys.platform == "win32" else "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.Popen([opener, str(source)])
     except OSError as error:
-        raise HTTPException(500, f"Could not open File Explorer: {error}") from error
+        raise HTTPException(500, f"Could not open the folder: {error}") from error
     return {"opened": True}
 
 

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "category": "Utility",
+    "shortDescription": "Organize files by content with a review before every move"
+  }
+}

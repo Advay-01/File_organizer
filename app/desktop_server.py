@@ -1,4 +1,4 @@
-"""Windows desktop sidecar entry point for the Sortly local API.
+"""Desktop sidecar entry point for the Sortly local API.
 
 The development API is normally started with:
 

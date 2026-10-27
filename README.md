@@ -2,9 +2,17 @@
 
 **Organize files by their contents. Review every change before it happens.**
 
-Sortly is a Windows desktop file organizer with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
+Sortly is a desktop file organizer for Windows, Linux, and macOS with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
 
-[Download 1.0.8 for Windows x64](https://github.com/Advay-01/Sortly/releases/download/v1.0.8/Sortly_1.0.8_x64-setup.exe) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
+[Download Sortly 1.0.9](https://github.com/Advay-01/Sortly/releases/tag/v1.0.9) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
+
+| Your system | Download |
+| --- | --- |
+| Windows x64 | `Sortly_1.0.9_x64-setup.exe` |
+| Linux x64 | `.deb` for Debian/Ubuntu, or `.AppImage` |
+| macOS Apple Silicon | `_aarch64.dmg` |
+
+Installers include the local service: Python and Node.js are not required. Check downloads against their platform's `SHA256SUMS` file on the release page. Windows builds are unsigned; macOS builds use ad-hoc signing and are **not Apple notarized**, so macOS may require approval in Privacy & Security. The macOS build targets version 13 or newer. Linux packages are built on Ubuntu 22.04; compatibility with every distribution is not guaranteed.
 
 ## See it work
 
@@ -54,7 +62,7 @@ Chat stays available when switching tabs and reanalyzing the same folder. Select
 | Reorganize already sorted files | Off | Requests fresh classification instead of reusing cached analysis. |
 | Allow redacted cloud analysis for sensitive files | Off | Allows an explicitly enabled redacted request; sensitive files remain unselected by default. |
 
-Appearance supports system, light, and dark themes. The theme preference is saved locally. Reduced-motion preferences are respected. Analysis uses a small wave indicator and can be cancelled from its action button.
+Appearance supports system, light, and dark themes. The theme preference is saved locally. Reduced-motion preferences are respected. Analysis shows a thin light travelling left to right across the width of Ask Sortly and can be cancelled from its action button.
 
 ## Files and privacy
 
@@ -69,7 +77,9 @@ Detection checks file signatures and supported text structures. A proposed exten
 
 Likely Aadhaar, PAN, credentials, private keys, payment-card details, and personal financial documents are detected locally. Suspected sensitive files are excluded from cloud classification by default, omitted from chat context, and left unselected. Any permitted cloud evidence is redacted. Detection is heuristic, so review the flags. A Sensitive status leaves a file in its current location; it does not automatically relocate it or create a permission-protected folder.
 
-Provider API keys entered in Providers are encrypted with Windows DPAPI and never returned to the frontend. Files are processed locally for extraction; configuring a cloud LLM sends the allowed text and metadata evidence to that provider. Ollama is available for local model requests.
+Provider API keys are never returned to the frontend. Windows uses DPAPI encryption. On macOS and Linux, credentials are encrypted with a key kept in macOS Keychain or a Linux Secret Service keyring. Linux needs an unlocked desktop keyring, such as GNOME Keyring. If secure storage is unavailable, saving credentials fails rather than falling back to plaintext; environment variables and local Ollama remain available. Re-enter credentials when moving settings to another OS or device.
+
+Files are processed locally for extraction; configuring a cloud LLM sends the allowed text and metadata evidence to that provider. Ollama is available for local model requests.
 
 ## Safety and current limits
 
@@ -89,9 +99,9 @@ The primary app uses **React + Tauri 2**, backed by a local **FastAPI** service.
 
 ### Prerequisites
 
-- Windows x64, a working Python 3.10+ installation, and Node.js 22+.
+- Windows x64, Linux x64, or macOS, a working Python 3.10+ installation, and Node.js 22+.
 - A configured LLM provider or running local Ollama instance.
-- For desktop builds: Visual Studio C++ Build Tools and the Rust/NSIS tools prepared by the scripts.
+- For desktop builds: Rust and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS. Windows requires Visual Studio C++ Build Tools; macOS requires Xcode command-line tools; Linux requires WebKitGTK 4.1 and GTK development libraries.
 
 ### Install dependencies
 
@@ -135,10 +145,32 @@ Outputs:
 
 ```text
 src-tauri/target/release/sortly.exe
-src-tauri/target/release/bundle/nsis/Sortly_1.0.7_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Sortly_1.0.9_x64-setup.exe
 ```
 
 The installer is currently unsigned. Provider credentials and local sample folders are not bundled. A packaged app can also load an external `sortly.env` or a file specified by `SORTLY_ENV_FILE`.
+
+### Build Linux or macOS packages
+
+Build on the target OS and architecture; PyInstaller bundles that platform's Python runtime.
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-build.txt
+npm ci
+npm --prefix frontend ci
+python scripts/build-sidecar.py
+npm run tauri -- build
+```
+
+Linux outputs are in `src-tauri/target/release/bundle/deb/` and `appimage/`. Apple Silicon macOS outputs are in `bundle/dmg/`, with the app in `bundle/macos/`. The platform config files preserve the Windows NSIS target. Intel Mac packages are not part of this release.
+
+The **Desktop release** GitHub Actions workflow builds Windows x64, Ubuntu 22.04 x64, and Apple Silicon macOS independently. It runs backend and frontend tests, frozen-API regressions with a local fixture provider, and native desktop/API startup checks before collecting installers and checksums. It runs on the release branch or can be started manually. A manual run against a matching `vX.Y.Z` tag publishes only after every platform passes.
+
+The **Publish verified installers** workflow can instead reuse successful build artifacts. Run it against a release tag with the Windows, Linux and macOS build run IDs. It checks that all three native jobs passed, that their application source matches the tag, and that every installer matches its checksum before publishing. Documentation and CI-only changes do not require rebuilding the apps.
+
+Mac builds currently have ad-hoc signatures. Developer ID signing and Apple notarization require separate credentials; see [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/). The CI test keychain contains generated fixture credentials only and is not shipped.
 
 ### Test
 
@@ -168,7 +200,7 @@ Use `--recursive` for nested files, `-o` for a separate output folder, and `-m` 
 app/api.py                  Preview, chat, review edits, Apply, and Undo endpoints
 app/core/                   Extraction, classification, privacy, planning, and history
 frontend/src/               React workspace and review interface
-src-tauri/                  Windows shell and local service lifecycle
+src-tauri/                  Native desktop shell and local service lifecycle
 scripts/                    Desktop build and packaging helpers
 tests/                      Backend and packaging regressions
 frontend/tests/             Frontend unit and browser workflow checks

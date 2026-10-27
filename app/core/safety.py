@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+import ctypes
 import errno
 import shutil
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,26 +185,52 @@ def validate_move_paths(
     if is_reparse_point(source) or (destination.exists() and is_reparse_point(destination)) or any(
         parent.exists() and is_reparse_point(parent)
         for parent in destination.parents
-        if root in parent.parents or parent == root
+        if resolved_inside(parent, root)
     ):
         raise UnsafePathError("File operations may not traverse symlinks or junctions.")
-    relative_parts = destination.relative_to(root).parts
-    if any(part in {".", ".."} for part in relative_parts):
+    relative_parts = destination_resolved.relative_to(root).parts
+    if any(part in {".", ".."} for part in destination.parts):
         raise UnsafePathError("Destination contains an unsafe relative path.")
     if any(part.casefold() in PROTECTED_NAMES for part in relative_parts):
         raise UnsafePathError("Destination uses a protected directory name.")
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    if os.name == "nt":
+        os.rename(source, destination)
+        return
+    # POSIX os.rename replaces existing files. Use native exclusive rename
+    # flags, including when a destination is created after validation.
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(library, "renamex_np", None)
+        if rename is None:
+            raise OSError(errno.ENOSYS, "Exclusive rename is unavailable")
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(source), os.fsencode(destination), 0x00000004)  # RENAME_EXCL
+    else:
+        rename = getattr(library, "renameat2", None)
+        if rename is None:
+            raise OSError(errno.ENOSYS, "Exclusive rename is unavailable")
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1)  # AT_FDCWD, RENAME_NOREPLACE
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(destination))
 
 
 def move_file_no_overwrite(source: Path, destination: Path) -> None:
     """Move a file without a check-then-overwrite race."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.rename(source, destination)
+        _rename_no_replace(source, destination)
         return
     except FileExistsError:
         raise
     except OSError as error:
-        if error.errno != errno.EXDEV:
+        if error.errno not in {errno.EXDEV, errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
             raise
 
     created = False

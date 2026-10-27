@@ -1,0 +1,146 @@
+name: Desktop release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/multiplatform-release]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-22.04
+          - platform: macos-arm64
+            os: macos-15
+          - platform: windows-x64
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      NO_STRIP: 'true'
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.platform }}
+          cache-on-failure: true
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2 patchelf xvfb xdg-utils gnome-keyring dbus-x11
+      - name: Isolated macOS test keychain
+        if: runner.os == 'macOS'
+        run: |
+          security create-keychain -p sortly-ci-fixture "$RUNNER_TEMP/sortly-ci.keychain"
+          security default-keychain -s "$RUNNER_TEMP/sortly-ci.keychain"
+          security unlock-keychain -p sortly-ci-fixture "$RUNNER_TEMP/sortly-ci.keychain"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/sortly-ci.keychain"
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Dependencies
+        run: |
+          python -m pip install -r requirements-build.txt pytest psutil requests
+          npm ci
+          npm --prefix frontend ci
+      - name: Backend tests
+        run: python -m pytest -q
+      - name: Frontend tests
+        run: npm --prefix frontend test
+      - name: Native Python service
+        run: python scripts/build-sidecar.py
+      - name: Frozen API regression
+        shell: bash
+        run: |
+          service=dist/sortly-api/sortly-api
+          if [ "$RUNNER_OS" = Windows ]; then service="$service.exe"; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- bash -c 'printf "sortly-ci-fixture\n" | gnome-keyring-daemon --unlock; python scripts/smoke-sidecar.py --executable dist/sortly-api/sortly-api --output build/sidecar-smoke.json'
+          else
+            python scripts/smoke-sidecar.py --executable "$service" --output build/sidecar-smoke.json
+          fi
+      - name: Native Tauri installers
+        run: npm run tauri -- build
+      - name: Rust startup tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Linux installed desktop smoke
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg -i src-tauri/target/release/bundle/deb/*.deb
+          xvfb-run -a python scripts/smoke-desktop.py --executable /usr/bin/sortly --output build/desktop-smoke.json
+          xvfb-run -a python scripts/smoke-desktop.py --executable src-tauri/target/release/bundle/appimage/*.AppImage --output build/appimage-smoke.json
+      - name: macOS bundled desktop smoke
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict src-tauri/target/release/bundle/macos/Sortly.app
+          python scripts/smoke-desktop.py --executable src-tauri/target/release/bundle/macos/Sortly.app/Contents/MacOS/sortly --output build/desktop-smoke.json
+      - name: Windows desktop smoke
+        if: runner.os == 'Windows'
+        run: python scripts/smoke-desktop.py --executable src-tauri/target/release/sortly.exe --output build/desktop-smoke.json
+      - name: Checksums and installers
+        run: python scripts/collect-release.py --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.platform }}
+          path: |
+            build/*smoke.json
+            build/*smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish tested native installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/release-notes.py "$RELEASE_TAG" > release-notes.md
+          gh release create "$RELEASE_TAG" --verify-tag --title "Sortly $RELEASE_TAG" --notes-file release-notes.md release-assets/*

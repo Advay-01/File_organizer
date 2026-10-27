@@ -4,8 +4,10 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.wintypes
+import hashlib
 import json
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,8 +134,8 @@ def _blob(data: bytes) -> tuple[_DataBlob, Any]:
 
 
 def _protect_secret(secret: str) -> str:
-    if os.name != "nt":
-        raise ProviderConfigurationError("Secure credential storage requires Windows DPAPI.")
+    if sys.platform != "win32":
+        return "keyring-fernet:" + _native_cipher(create=True).encrypt(secret.encode("utf-8")).decode("ascii")
     data_in, _buffer_in = _blob(secret.encode("utf-8"))
     data_out = _DataBlob()
     if not _crypt32().CryptProtectData(
@@ -154,8 +156,14 @@ def _protect_secret(secret: str) -> str:
 
 
 def _unprotect_secret(encrypted: str) -> str:
-    if os.name != "nt":
-        raise ProviderConfigurationError("Secure credential storage requires Windows DPAPI.")
+    if sys.platform != "win32":
+        if not encrypted.startswith("keyring-fernet:"):
+            raise ProviderConfigurationError("Re-enter this API key on this device; its saved encryption is for another platform.")
+        cipher = _native_cipher(create=False)
+        try:
+            return cipher.decrypt(encrypted.removeprefix("keyring-fernet:").encode("ascii")).decode("utf-8")
+        except Exception:
+            raise ProviderConfigurationError("The saved credential could not be unlocked. Re-enter its API key on this device.") from None
     data_in, _buffer_in = _blob(base64.b64decode(encrypted))
     data_out = _DataBlob()
     if not _crypt32().CryptUnprotectData(
@@ -172,6 +180,36 @@ def _unprotect_secret(encrypted: str) -> str:
         return ctypes.string_at(data_out.pbData, data_out.cbData).decode("utf-8")
     finally:
         _local_free(data_out.pbData)
+
+
+def _native_keyring():
+    # Select trusted OS stores explicitly. Never select a third-party plaintext
+    # backend through keyring's plugin/configuration discovery.
+    if sys.platform == "darwin":
+        from keyring.backends.macOS import Keyring
+    else:
+        from keyring.backends.SecretService import Keyring
+    return Keyring()
+
+
+def _native_cipher(*, create: bool):
+    from cryptography.fernet import Fernet
+
+    account = hashlib.sha256(str(_settings_path().resolve()).encode("utf-8")).hexdigest()
+    try:
+        backend = _native_keyring()
+        key = backend.get_password("com.sortly.organizer", account)
+        if key is None:
+            if not create:
+                raise ValueError("No key in this device's secure store")
+            key = Fernet.generate_key().decode("ascii")
+            backend.set_password("com.sortly.organizer", account, key)
+        return Fernet(key.encode("ascii"))
+    except Exception:
+        raise ProviderConfigurationError(
+            "Secure credential storage is unavailable. Unlock your macOS Keychain or Linux Secret Service keyring, "
+            "or configure the provider through its environment variable. Credentials were not saved as plaintext."
+        ) from None
 
 
 def provider_definitions() -> List[dict]:

@@ -1,4 +1,4 @@
-"""Open a native Windows folder picker from its own main thread."""
+"""Open a native folder picker from its own main thread."""
 from __future__ import annotations
 
 import tkinter as tk
