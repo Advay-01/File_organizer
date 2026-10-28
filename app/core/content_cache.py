@@ -13,7 +13,7 @@ from app.core.evidence import EvidenceBundle
 from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
-CACHE_VERSION = 14
+CACHE_VERSION = 15
 DEFAULT_DB = Path(os.environ.get("ORGANIZER_CACHE_DB", Path.home() / ".file_organizer" / "cache.db"))
 
 
@@ -94,6 +94,8 @@ def analysis_cache_key(
     models: list[str],
     known_folders: list[str],
     allow_rename: bool = True,
+    instructions: list[str] | None = None,
+    dataset_context: str = "",
 ) -> str:
     value = json.dumps(
         {
@@ -105,9 +107,12 @@ def analysis_cache_key(
             "parser_status": evidence.parser_status,
             "filename": evidence.filename.lower(),
             "parent_directory": evidence.parent_directory.lower(),
+            "parent_path": os.path.normcase(os.path.abspath(Path(evidence.path).parent)),
             "models": models,
             "known_folders": sorted(folder.lower() for folder in known_folders),
             "allow_rename": allow_rename,
+            "instructions": list(instructions or []),
+            "dataset_context": dataset_context,
             "endpoints": {
                 key: value
                 for key, value in sorted(os.environ.items())

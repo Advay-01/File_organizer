@@ -1,8 +1,10 @@
 export type ChatRule = {
-  action: "move" | "exclude";
-  match: { topic?: string | null; extension?: string | null; glob?: string | null };
+  version?: 1;
+  action: "move" | "exclude" | "rename";
+  match: { topic?: string | null; extension?: string | null; glob?: string | null; folder?: string | null };
   target: string | null;
   reason: string;
+  naming?: { enabled?: boolean | null; max_length?: number | null; generic_only?: boolean | null; preserve_dates?: boolean } | null;
 };
 export type ChatResult = { reply: string; rules: ChatRule[]; needs_clarification: string | null };
 export type ChatMessage = {

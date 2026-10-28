@@ -6,15 +6,22 @@ import re
 import shutil
 import zipfile
 from dataclasses import asdict, dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
+import subprocess
+import tempfile
 from typing import List
+from xml.etree import ElementTree
 
 from app.core.extractor import _read_text, extract_content, extract_snippet
 from app.core.privacy import detect_sensitive, detect_suspicious_commands, redact_sensitive
 from app.models.schemas import FileInfo
 from app.core.safety import snapshot_file
 
-EVIDENCE_VERSION = 4
+EVIDENCE_VERSION = 5
+_XMP_LIMIT = 256 * 1024
+_XMP_MM = "http://ns.adobe.com/xap/1.0/mm/"
+_XMP_REF = "http://ns.adobe.com/xap/1.0/sType/ResourceRef#"
 
 
 @dataclass
@@ -138,6 +145,82 @@ def _clean_metadata(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:500]
 
 
+def _xmp_relationship_metadata(raw: object) -> dict:
+    """Read bounded, embedded identifiers without resolving any resource reference."""
+    if not isinstance(raw, (str, bytes)) or len(raw) > _XMP_LIMIT:
+        return {}
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    if len(raw) > _XMP_LIMIT:
+        return {}
+    if b"\x00" in raw or b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        return {}
+    try:
+        root = ElementTree.fromstring(raw)
+    except (ValueError, LookupError, ElementTree.ParseError):
+        return {}
+    elements = list(root.iter())
+    if len(elements) > 2048:
+        return {}
+    values: dict[str, set[str]] = {}
+
+    def remember(key: str, value: object) -> None:
+        if isinstance(value, str):
+            value = value.strip()
+            if 3 <= len(value) <= 256 and not re.search(r"[\s\x00-\x1f<>\"']", value):
+                values.setdefault(key, set()).add(value)
+
+    for local, key in (("DocumentID", "xmp_document_id"), ("InstanceID", "xmp_instance_id"),
+                       ("OriginalDocumentID", "xmp_original_document_id")):
+        tag = f"{{{_XMP_MM}}}{local}"
+        for element in elements:
+            if element.tag == tag:
+                remember(key, element.text)
+            remember(key, element.attrib.get(tag))
+    for derived in root.iter(f"{{{_XMP_MM}}}DerivedFrom"):
+        for element in derived.iter():
+            for local, key in (("documentID", "xmp_derived_from_document_id"),
+                               ("instanceID", "xmp_derived_from_instance_id")):
+                tag = f"{{{_XMP_REF}}}{local}"
+                if element.tag == tag:
+                    remember(key, element.text)
+                remember(key, element.attrib.get(tag))
+    if any(len(items) > 1 for items in values.values()):
+        return {"xmp_relationship_conflict": "Embedded document identifiers contradict each other."}
+    return {key: next(iter(items)) for key, items in values.items()}
+
+
+class _LocalResourceParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.references: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        fields = dict(attrs)
+        reference = fields.get("src") if tag in {"img", "script", "source", "video", "audio"} else None
+        if tag == "link" and "stylesheet" in (fields.get("rel") or "").casefold().split():
+            reference = fields.get("href")
+        if reference and len(reference) <= 2048 and len(self.references) < 64:
+            if reference not in self.references:
+                self.references.append(reference)
+
+
+def _has_semantic_metadata(metadata: dict) -> bool:
+    """Dimensions, provenance IDs, software names and authors do not prove a subject."""
+    generic = re.compile(
+        r"^(?:untitled|document|presentation|slide\s*show|microsoft\s+(?:word|powerpoint|excel))"
+        r"(?:[\s_-]*\d+)?(?:\.(?:docx?|pptx?|pdf|xlsx?))?$", re.I,
+    )
+    for key in ("title", "subject", "keywords", "description", "headings"):
+        value = metadata.get(key)
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if len(value) >= 8 and re.search(r"[^\W\d_]", value, re.UNICODE) and not generic.fullmatch(value):
+            return True
+    return False
+
+
 def _document_metadata(path: Path, extension: str) -> dict:
     metadata = {}
     try:
@@ -157,6 +240,9 @@ def _document_metadata(path: Path, extension: str) -> dict:
                 value = _clean_metadata(raw.get(source))
                 if value:
                     metadata[target] = value
+            xmp = reader.root_object.get("/Metadata")
+            if xmp:
+                metadata.update(_xmp_relationship_metadata(xmp.get_object().get_data()))
         elif extension == ".docx":
             import docx
 
@@ -205,8 +291,11 @@ def _document_metadata(path: Path, extension: str) -> dict:
                         metadata[target] = value
                 metadata["dimensions"] = f"{image.width}x{image.height}"
                 metadata["image_format"] = image.format or ""
+                xmp = image.info.get("xmp") or image.info.get("XML:com.adobe.xmp") or exif.get(700)
+                metadata.update(_xmp_relationship_metadata(xmp))
         elif extension in {".html", ".htm"}:
-            raw = path.read_text(encoding="utf-8", errors="ignore")[:20000]
+            with path.open("r", encoding="utf-8", errors="ignore") as source:
+                raw = source.read(20000)
             title = re.search(r"<title[^>]*>(.*?)</title>", raw, re.I | re.S)
             if title:
                 metadata["title"] = _clean_metadata(re.sub(r"<[^>]+>", " ", title.group(1)))
@@ -215,21 +304,66 @@ def _document_metadata(path: Path, extension: str) -> dict:
                 metadata["headings"] = " | ".join(
                     _clean_metadata(re.sub(r"<[^>]+>", " ", value)) for value in headings[:5]
                 )
+            resources = _LocalResourceParser()
+            resources.feed(raw)
+            if resources.references:
+                metadata["local_dependencies"] = resources.references
+        elif extension == ".xmp":
+            with path.open("rb") as source:
+                metadata.update(_xmp_relationship_metadata(source.read(_XMP_LIMIT + 1)))
     except Exception:
         metadata["warning"] = "metadata could not be read"
     return metadata
 
 
 def _ocr_image(path: Path, max_chars: int) -> tuple[str, bool]:
-    if not shutil.which("tesseract"):
+    executable = shutil.which("tesseract")
+    if not executable:
         return "", False
     try:
-        import pytesseract
         from PIL import Image
 
-        with Image.open(path) as image:
-            text = pytesseract.image_to_string(image)
+        with tempfile.TemporaryDirectory(prefix="sortly-ocr-") as temp:
+            raster = Path(temp) / "page.png"
+            with Image.open(path) as image:
+                image.thumbnail((1600, 1600))
+                image.convert("RGB").save(raster)
+            completed = subprocess.run(
+                [executable, str(raster), "stdout", "--psm", "3"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace", check=True, timeout=10,
+            )
+            text = completed.stdout
         return re.sub(r"\s+", " ", text).strip()[:max_chars], bool(text.strip())
+    except Exception:
+        return "", False
+
+
+def _ocr_pdf(path: Path, max_chars: int) -> tuple[str, bool]:
+    """Inspect at most two low-resolution pages with already installed local tools."""
+    renderer = shutil.which("pdftoppm")
+    if not renderer or not shutil.which("tesseract"):
+        return "", False
+    try:
+        with tempfile.TemporaryDirectory(prefix="sortly-pdf-ocr-") as temp:
+            prefix = Path(temp) / "page"
+            subprocess.run(
+                [renderer, "-f", "1", "-l", "2", "-r", "120", "-scale-to", "1600",
+                 "-png", str(path), str(prefix)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True, timeout=15,
+            )
+            parts = []
+            for raster in sorted(Path(temp).glob("page-*.png"))[:2]:
+                if raster.stat().st_size > 12 * 1024 * 1024:
+                    continue
+                text, _used = _ocr_image(raster, max_chars)
+                if text:
+                    parts.append(text)
+                if sum(map(len, parts)) >= max_chars:
+                    break
+            content = " ".join(parts)[:max_chars]
+            return content, bool(content)
     except Exception:
         return "", False
 
@@ -264,6 +398,9 @@ def extract_evidence(
         )
 
     content = extraction.text
+    if re.fullmatch(r"Image:\s*[A-Za-z0-9]+\s*;\s*\d+x\d+", content.strip()):
+        # The image parser's format/dimension summary is not semantic content.
+        content = ""
     metadata = _document_metadata(path, extension)
     if metadata.pop("warning", None):
         warnings.append("Metadata could not be fully read; the file may be encrypted or malformed.")
@@ -271,6 +408,13 @@ def extract_evidence(
         warnings.append(str(metadata["warning"]))
 
     ocr_used = False
+    if len(content.strip()) < 20 and signature_type == ".pdf":
+        ocr_content, ocr_used = _ocr_pdf(path, max_chars)
+        if ocr_content:
+            content = ocr_content
+            warnings.append("Text came from optional PDF OCR of up to two pages and should be reviewed.")
+        else:
+            warnings.append("No PDF text was extracted. Optional local Poppler and Tesseract OCR may be required; review this file.")
     if len(content.strip()) < 20 and extension in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}:
         content, ocr_used = _ocr_image(path, max_chars)
         if content:
@@ -292,8 +436,9 @@ def extract_evidence(
         sources.append("file_signature")
     elif extraction.detected_type != "unknown":
         sources.append("text_format_detection")
-    status = "sufficient" if len(content) >= 80 or metadata else (
-        "weak" if content or metadata else "unavailable"
+    semantic_metadata = _has_semantic_metadata(metadata)
+    status = "sufficient" if len(content.strip()) >= 80 else (
+        "weak" if content.strip() or semantic_metadata else "unavailable"
     )
     if status == "unavailable":
         warnings.append("No reliable content or metadata could be extracted.")

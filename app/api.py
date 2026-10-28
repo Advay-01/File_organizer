@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from copy import deepcopy
+from fnmatch import fnmatchcase
 import json
 import os
 import logging
@@ -25,10 +26,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core import history, provider_catalog, provider_store
 from app.core import chat as chat_engine
+from app.core.chat_resolution import parser_context, resolve_topic
+from app.core.semantic_index import SemanticConfig, SemanticIndex
 from app.core.content_intelligence import (
     ContentSuggestion,
     plan_content_intelligence,
@@ -44,7 +47,9 @@ from app.core.safety import (
     file_identity,
     should_skip_directory,
     validate_move_paths,
+    verify_file_snapshot,
 )
+from app.models.schemas import FileInfo
 from app.core.scanner import scan_directory_with_report
 from app.main import resolve_models
 from app.history_api import router as history_router
@@ -127,6 +132,14 @@ class PreviewRequest(BaseModel):
     reorganize: bool = False
     models: List[str] | None = None
     allow_sensitive_cloud: bool = False
+    instructions: List[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("instructions")
+    @classmethod
+    def bounded_instructions(cls, values: List[str]) -> List[str]:
+        if any(not value.strip() or len(value) > 4000 for value in values) or sum(map(len, values)) > 16000:
+            raise ValueError("Use nonempty organization instructions totaling at most 16000 characters.")
+        return [value.strip() for value in values]
 
 
 class ApplyFile(BaseModel):
@@ -205,6 +218,7 @@ class PreviewResponse(BaseModel):
     requires_confirmation: bool = False
     scan_summary: dict = Field(default_factory=dict)
     analysis_stats: dict = Field(default_factory=dict)
+    rules_revision: int = 0
 
 
 @dataclass
@@ -220,6 +234,11 @@ class StoredPlan:
     chat_decisions: dict = field(default_factory=dict)
     scan_summary: dict = field(default_factory=dict)
     analysis_stats: dict = field(default_factory=dict)
+    semantic_index: SemanticIndex | None = field(default=None, repr=False)
+    organization_instructions: list[str] = field(default_factory=list)
+    chat_topic_cache: dict = field(default_factory=dict, repr=False)
+    rules_revision: int = 0
+    pending_clarification: str | None = None
     lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
@@ -321,15 +340,39 @@ def _same_path(first: Path | str, second: Path | str) -> bool:
     return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
 
 
-def _unique_destination(destination: Path, taken: set[str], source: Path | str | None = None) -> Path:
+class NamingPolicyConflict(ValueError):
+    pass
+
+
+def _naming_policy(decisions: dict, index: int) -> dict | None:
+    value = decisions.get(f"naming:{index}")
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or value[0] != "rename":
+        return None
+    return json.loads(value[1])
+
+
+def _unique_destination(destination: Path, taken: set[str], source: Path | str | None = None,
+                        *, naming_policy: dict | None = None) -> Path:
     # A source is not a collision, including when a suffix candidate reaches
     # its current name. Repeated analysis must not keep incrementing that suffix.
     candidate = destination
+    original = Path(source).name if source is not None else destination.name
+    if naming_policy is not None:
+        name = chat_engine.collision_filename(destination.name, original, naming_policy)
+        if name is None:
+            raise NamingPolicyConflict("Filename constraints cannot preserve the extension and existing dates.")
+        candidate = destination.with_name(name)
     index = 1
     while (str(candidate).casefold() in taken or candidate.exists()) and not (
         source is not None and _same_path(candidate, source)
     ):
-        candidate = destination.with_name(f"{destination.stem}-{index}{destination.suffix}")
+        if naming_policy is None:
+            candidate = destination.with_name(f"{destination.stem}-{index}{destination.suffix}")
+        else:
+            name = chat_engine.collision_filename(destination.name, original, naming_policy, f"-{index}")
+            if name is None:
+                raise NamingPolicyConflict("A collision suffix cannot fit the filename constraints safely.")
+            candidate = destination.with_name(name)
         index += 1
     taken.add(str(candidate).casefold())
     return candidate
@@ -409,11 +452,15 @@ def _apply_user_edits(plan: StoredPlan, request: ApplyRequest) -> List[Move]:
         destination_name = source.name if requested_name == source.name and planned_extension == source.suffix else (
             sanitize_windows_filename(requested_name, source.name, target_extension=planned_extension)
         )
-        destination = _unique_destination(
-            plan.source.joinpath(category, subcategory, destination_name),
-            taken,
-            source,
-        )
+        policy = _naming_policy(plan.chat_decisions, index) if (
+            not edit.destination_name or edit.destination_name == Path(original.dest).name
+        ) else None  # A newly typed per-file name is an explicit user override.
+        try:
+            destination = _unique_destination(
+                plan.source.joinpath(category, subcategory, destination_name), taken, source, naming_policy=policy,
+            )
+        except NamingPolicyConflict as error:
+            raise HTTPException(409, "Create a new preview and review the filename length/date constraints.") from error
         moves.append(
             Move(
                 str(source),
@@ -495,14 +542,17 @@ def preview(request: PreviewRequest) -> PreviewResponse:
     if not source.is_dir():
         raise HTTPException(400, "Choose an existing folder.")
 
+    scan_started = perf_counter()
     files, scan_summary = scan_directory_with_report(
         str(source),
         recursive=request.recursive,
         policy=ScanPolicy.from_env(),
     )
+    scan_seconds = perf_counter() - scan_started
     plan_warnings = []
     requires_confirmation = False
     analysis_stats = {}
+    semantic_index = None
     if files:
         existing = sorted(
             item.name
@@ -521,6 +571,7 @@ def preview(request: PreviewRequest) -> PreviewResponse:
                 use_cache=not request.reorganize,
                 allow_rename=request.rename,
                 allow_sensitive_cloud=request.allow_sensitive_cloud,
+                instructions=request.instructions,
             )
             suggestions = result.suggestions
             moves = _content_moves(suggestions, source)
@@ -528,6 +579,9 @@ def preview(request: PreviewRequest) -> PreviewResponse:
             plan_warnings = list(sanity.warnings)
             requires_confirmation = sanity.requires_confirmation
             analysis_stats = dict(result.stats)
+            analysis_stats["scan_seconds"] = round(scan_seconds, 4)
+            semantic_index = getattr(result, "semantic_index", None)
+            plan_warnings.extend(analysis_stats.get("analysis_warnings", []))
         except (RuntimeError, ValueError) as error:
             # Parsing and validation failures from model replies are provider-facing errors.
             raise HTTPException(502, str(error)[:600]) from error
@@ -537,6 +591,7 @@ def preview(request: PreviewRequest) -> PreviewResponse:
 
     plan_id = str(uuid4())
     plans[plan_id] = StoredPlan(source=source, moves=moves, suggestions=suggestions,
+                              semantic_index=semantic_index, organization_instructions=list(request.instructions),
                               analysis_stats=dict(analysis_stats), scan_summary={
         "files_seen": scan_summary.files_seen, "skipped": scan_summary.skipped,
         "reasons": scan_summary.reasons, "truncated": scan_summary.truncated,
@@ -582,6 +637,71 @@ def preview(request: PreviewRequest) -> PreviewResponse:
     )
 
 
+def _prepare_chat_names(plan: StoredPlan, result: chat_engine.ChatResult, context: dict, models: list[str], resolver) -> None:
+    """Generate missing per-file proposals only after an explicit chat opt-in."""
+    if not any(rule.action == "rename" and rule.naming.enabled is not None for rule in result.rules):
+        return
+    requested: set[int] = set()
+    scopes = deepcopy(plan.moves)
+    for rule in result.rules:
+        topic_ids = set(resolver(rule.match.topic, context).ids) if rule.match.topic else set()
+        for index, (move, suggestion) in enumerate(zip(scopes, plan.suggestions)):
+            if (suggestion.sensitive or suggestion.requires_relationship_review
+                    or suggestion.extraction_status == "unavailable"):
+                continue
+            relative = Path(move.src).relative_to(plan.source).as_posix()
+            matched = (index in topic_ids if rule.match.topic else
+                       chat_engine.matches_folder(move, rule.match.folder) if rule.match.folder else
+                       Path(move.src).suffix.casefold() == rule.match.extension.casefold()
+                       if rule.match.extension else
+                       fnmatchcase(relative.casefold(), rule.match.glob.replace("\\", "/").casefold()))
+            if matched:
+                if rule.action == "move":
+                    parts = rule.target.split("/")
+                    move.folder, move.subfolder = parts[0], parts[1] if len(parts) == 2 else ""
+                    continue
+                if rule.action == "exclude":
+                    requested.discard(index)
+                    continue
+                if rule.naming.enabled is None:
+                    continue
+                if rule.naming.enabled and not (rule.naming.generic_only and not chat_engine.is_generic_original(Path(move.src).name)):
+                    if not suggestion.name_evidence or not suggestion.rename_reason.startswith("Grounded in evidence:"):
+                        requested.add(index)
+                else:
+                    requested.discard(index)
+    if not requested:
+        return
+    files = []
+    ordered = sorted(requested)
+    for index in ordered:
+        move = plan.moves[index]
+        try:
+            verify_file_snapshot(Path(move.src), move.source_snapshot)
+        except OSError as error:
+            raise HTTPException(409, "A source changed; create a new preview before requesting filenames.") from error
+        files.append(FileInfo(path=move.src, filename=Path(move.src).name, extension=Path(move.src).suffix,
+                              size_kb=0, date_created="", source_snapshot=move.source_snapshot))
+    generated = plan_content_intelligence(
+        files, str(plan.source), models, allow_rename=True,
+        known_folders=sorted({_target_path(move) for move in plan.moves}),
+        instructions=plan.organization_instructions,
+        semantic_config=SemanticConfig(enabled=False),
+    )
+    for index, candidate in zip(ordered, generated.suggestions):
+        if candidate.sensitive or not candidate.name_evidence or not candidate.rename_reason.startswith("Grounded in evidence:"):
+            continue
+        suggestion, move = plan.suggestions[index], plan.moves[index]
+        suggestion.suggested_name = sanitize_windows_filename(
+            candidate.suggested_name, Path(move.src).name, target_extension=Path(move.dest).suffix,
+        )
+        suggestion.name_evidence = candidate.name_evidence
+        suggestion.rename_reason = candidate.rename_reason
+        plan.chat_decisions[f"naming-source:{index}"] = {
+            "name": suggestion.suggested_name, "reason": suggestion.rename_reason,
+        }
+
+
 @app.post("/api/chat")
 def chat(request: ChatRequest) -> dict:
     plan = plans.get(request.plan_id)
@@ -598,6 +718,10 @@ def chat(request: ChatRequest) -> dict:
             chat_rules=list(plan.chat_rules), chat_messages=list(plan.chat_messages),
             chat_decisions=dict(plan.chat_decisions), scan_summary=dict(plan.scan_summary),
             analysis_stats=dict(plan.analysis_stats),
+            semantic_index=plan.semantic_index,
+            organization_instructions=list(plan.organization_instructions),
+            chat_topic_cache=dict(plan.chat_topic_cache), rules_revision=plan.rules_revision,
+            pending_clarification=plan.pending_clarification,
         )
         if len(snapshot.moves) != len(snapshot.suggestions):
             raise HTTPException(409, "Create a new preview before chatting.")
@@ -607,22 +731,30 @@ def chat(request: ChatRequest) -> dict:
             ))
         _validate_for_apply(snapshot)
         context = chat_engine.context_for(snapshot)
-        # Bound requests before sending metadata to a provider.
-        if len(json.dumps(context)) > 180000:
-            raise HTTPException(400, "Choose a smaller folder for chat refinement.")
+        prompt_context = parser_context(context, request.message, semantic_index=plan.semantic_index)
         try:
             models = provider_store.activate_runtime() or resolve_models(None)
             user_message = {"role": "user", "content": chat_engine.redact_sensitive(request.message)}
             result = chat_engine.call_json(models, [
                 {"role": "system", "content": chat_engine.SYSTEM_PROMPT},
+                {"role": "system", "content": (
+                    "The context may contain representative intent-parsing samples. "
+                    "Rules will be resolved against the entire selected dataset, not only these samples."
+                )},
                 *snapshot.chat_messages[-12:],
-                {"role": "user", "content": json.dumps({"context": context,
+                {"role": "user", "content": json.dumps({"context": prompt_context,
                                                          "message": user_message["content"]})},
             ], chat_engine.ChatResult)
             response_preview = None
             if result.rules:
+                resolver = lambda topic, complete_context: resolve_topic(
+                    topic, complete_context, models, semantic_index=plan.semantic_index,
+                    cache=snapshot.chat_topic_cache,
+                )
+                _prepare_chat_names(snapshot, result, context, models, resolver)
                 moves, suggestions, conflict, affected, decisions = chat_engine.refine(
                     snapshot, result, context, models,
+                    topic_resolver=resolver,
                 )
                 notes = []
                 if not affected:
@@ -635,18 +767,30 @@ def chat(request: ChatRequest) -> dict:
                     result.reply = "; ".join(notes) + ". Review the preview before confirming."
                 # Resolve collisions and validate destinations before storing the new preview.
                 taken: set[str] = set()
-                for move in moves:
+                for index, move in enumerate(moves):
                     if move.selected:
                         if _same_path(move.dest, move.src):
                             move.selected = False
                         else:
-                            move.dest = str(_unique_destination(Path(move.dest), taken, Path(move.src)))
+                            try:
+                                move.dest = str(_unique_destination(
+                                    Path(move.dest), taken, Path(move.src), naming_policy=_naming_policy(decisions, index),
+                                ))
+                                suggestions[index].suggested_name = Path(move.dest).name
+                            except NamingPolicyConflict:
+                                move.selected = suggestions[index].selected = False
+                                suggestions[index].warnings.append(
+                                    "A filename collision cannot satisfy the length/date policy; review this file."
+                                )
                 new_id = str(uuid4())
                 new_plan = StoredPlan(
                     source=plan.source, moves=moves, suggestions=suggestions,
                     chat_rules=[*snapshot.chat_rules, *result.rules], chat_decisions=decisions,
                     scan_summary=dict(plan.scan_summary),
                     analysis_stats=dict(plan.analysis_stats),
+                    semantic_index=plan.semantic_index,
+                    organization_instructions=list(plan.organization_instructions),
+                    chat_topic_cache=dict(snapshot.chat_topic_cache), rules_revision=plan.rules_revision + 1,
                 )
                 _validate_for_apply(new_plan)
                 sanity = evaluate_plan(suggestions)
@@ -655,6 +799,7 @@ def chat(request: ChatRequest) -> dict:
                     already_organized=sum(not move.selected and _same_path(move.src, move.dest) for move in moves),
                     scan_summary=dict(plan.scan_summary),
                     analysis_stats=dict(plan.analysis_stats),
+                    rules_revision=new_plan.rules_revision,
                     plan_warnings=list(sanity.warnings), requires_confirmation=sanity.requires_confirmation,
                     files=[PlanItem(
                         id=str(index), name=Path(move.src).name,
@@ -673,6 +818,8 @@ def chat(request: ChatRequest) -> dict:
                 destination_plan = new_plan
             else:
                 destination_plan = plan
+            if result.needs_clarification:
+                destination_plan.pending_clarification = result.needs_clarification
             destination_plan.chat_messages = [
                 *snapshot.chat_messages[-10:], user_message,
                 {"role": "assistant", "content": result.model_dump_json()},
@@ -690,6 +837,8 @@ def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
                 409,
                 "This preview has already been used by an Apply attempt. Create a new preview.",
             )
+        if plan.pending_clarification:
+            raise HTTPException(409, "Resolve the chat clarification before applying this preview.")
         sanity = evaluate_plan(plan.suggestions)
         if sanity.requires_confirmation and not request.risk_acknowledged:
             raise HTTPException(409, "Review and acknowledge the unusual plan warnings before organizing.")

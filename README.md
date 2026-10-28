@@ -4,6 +4,10 @@
 
 Sortly is a desktop file organizer for Windows, Linux, and macOS with optional LLM instructions, editable rename suggestions, and undo. Folder names come from your files and instructions rather than a fixed category list.
 
+Development work on optional local semantic candidates and versioned chat naming
+rules is documented in [Hybrid file intelligence](docs/hybrid-file-intelligence.md).
+Its [evaluation guide](docs/hybrid-evaluation.md) separates fixture checks from real-model accuracy and speed measurements.
+
 [Download Sortly 1.0.10](https://github.com/Advay-01/Sortly/releases/tag/v1.0.10) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
 
 | Your system | Download |

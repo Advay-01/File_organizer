@@ -437,6 +437,7 @@ export default function App() {
     try {
       const original = await request<Preview>(apiBase, "/api/preview", {
         source, recursive, rename, reorganize, allow_sensitive_cloud: allowSensitiveCloud,
+        instructions: messages.filter((item) => item.role === "user" && item.instruction !== false).map((item) => item.text),
       }, controller.signal);
       if (controller.signal.aborted) return;
       let result = original;
@@ -860,6 +861,7 @@ export default function App() {
                   <OptionSwitch label="Allow redacted cloud analysis for sensitive files" checked={allowSensitiveCloud} tone="warning" onChange={(checked) => { setAllowSensitiveCloud(checked); resetPreview(); }} />
                 </div>
               </fieldset>
+              <p className="text-sm text-ink-muted">Your selected provider receives redacted filenames, folder context, extracted passages, and metadata. Sensitive files are excluded from cloud analysis unless you enable it above. Local embeddings do not change what is sent to a cloud provider.</p>
           </section>
           {settingsVisited && <div className="sortly-settings-sections" inert={busy !== null}>
             <details className="ui-panel"><summary>Appearance</summary><SettingsPanel preference={themePreference} onChange={setThemePreference} /></details>
