@@ -30,6 +30,7 @@ import HistoryPanel from "./components/HistoryPanel";
 import ProviderStudio from "./components/ProviderStudio";
 import ChatPanel, { type ChatResult } from "./components/ChatPanel";
 import AnalysisActivity from "./components/AnalysisActivity";
+import EmbeddingSettings from "./components/EmbeddingSettings";
 import { Button } from "./components/ui/button";
 import sortlyMark from "./assets/sortly-mark.svg";
 import { ApiError, fetchJson } from "./lib/api";
@@ -40,12 +41,14 @@ import {
   getFilenameExtensionChange,
   getInitialGroupLimit,
   getReviewBatchMode,
+  isGroupIncluded,
   shouldExpandGroupsInitially,
   shouldShowReviewTools,
   skipReasonLabel,
   summarizeFileWarning,
   summarizeGroup,
   summarizeReview,
+  toggleGroupSelection,
   type ReviewFileStatus,
   type ReviewFilter,
   type ReviewStats,
@@ -575,21 +578,7 @@ export default function App() {
 
   function toggleTarget(target: string) {
     const files = groups.find(([name]) => name === target)?.[1] ?? [];
-    const allAccepted = files.every((file) => fileEdits[file.id]?.accepted ?? file.selected);
-    setFileEdits((current) => {
-      const next = { ...current };
-      for (const file of files) {
-        next[file.id] = {
-          ...(current[file.id] ?? {
-            accepted: file.selected,
-            target_path: file.target_path,
-            destination_name: file.destination_name,
-          }),
-          accepted: !allAccepted,
-        };
-      }
-      return next;
-    });
+    setFileEdits((current) => toggleGroupSelection(files, current));
   }
 
   function toggleReviewGroup(target: string) {
@@ -758,7 +747,7 @@ export default function App() {
                   <div className="review-groups">
                     {visibleReviewGroups.map(([target, files]) => {
                       const allFiles = groups.find(([name]) => name === target)?.[1] ?? files;
-                      const selected = allFiles.every((file) => fileEdits[file.id]?.accepted ?? file.selected);
+                      const selected = isGroupIncluded(allFiles, fileEdits);
                       const groupSummary = summarizeGroup(allFiles, fileEdits);
                       const expanded = Boolean(expandedGroups[target]);
                       const panelId = `review-group-${encodeURIComponent(target)}`;
@@ -863,6 +852,9 @@ export default function App() {
               </fieldset>
               <p className="text-sm text-ink-muted">Your selected provider receives redacted filenames, folder context, extracted passages, and metadata. Sensitive files are excluded from cloud analysis unless you enable it above. Local embeddings do not change what is sent to a cloud provider.</p>
           </section>
+          {settingsVisited && (apiReady
+            ? <EmbeddingSettings apiBase={apiBase} disabled={busy !== null} onSaved={resetPreview} />
+            : <ServiceNotice runtime={apiRuntime} subject="Embedding settings" />)}
           {settingsVisited && <div className="sortly-settings-sections" inert={busy !== null}>
             <details className="ui-panel"><summary>Appearance</summary><SettingsPanel preference={themePreference} onChange={setThemePreference} /></details>
           </div>}

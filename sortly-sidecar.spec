@@ -30,7 +30,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # Keep optional ML runtimes out of this LLM-only desktop build.
+    # Local embeddings use a separately installed Ollama; keep its optional
+    # Python ML runtimes and model weights out of the desktop package.
     excludes=[
         "sentence_transformers", "transformers", "torch", "torchvision", "torchaudio",
         "numpy", "scipy", "sklearn",

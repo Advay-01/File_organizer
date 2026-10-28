@@ -18,7 +18,7 @@ from app.core.privacy import detect_sensitive, detect_suspicious_commands, redac
 from app.models.schemas import FileInfo
 from app.core.safety import snapshot_file
 
-EVIDENCE_VERSION = 5
+EVIDENCE_VERSION = 6
 _XMP_LIMIT = 256 * 1024
 _XMP_MM = "http://ns.adobe.com/xap/1.0/mm/"
 _XMP_REF = "http://ns.adobe.com/xap/1.0/sType/ResourceRef#"
@@ -488,6 +488,6 @@ def extract_evidence(
         extraction_status=status,
         ocr_used=ocr_used,
         sensitive_findings=[finding.to_dict() for finding in findings],
-        redacted_content=redact_sensitive(sensitivity_text),
+        redacted_content=redact_sensitive(sensitivity_text, [path.name, path.parent.name, *map(str, metadata.values())]),
         suspicious_commands=suspicious,
     )

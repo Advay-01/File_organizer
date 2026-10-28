@@ -7,12 +7,14 @@ import {
   getFilenameExtensionChange,
   getInitialGroupLimit,
   getReviewBatchMode,
+  isGroupIncluded,
   shouldExpandGroupsInitially,
   shouldShowReviewTools,
   skipReasonLabel,
   summarizeFileWarning,
   summarizeGroup,
   summarizeReview,
+  toggleGroupSelection,
   type ReviewFile,
 } from "../src/lib/review.ts";
 
@@ -33,6 +35,50 @@ function file(overrides: Partial<ReviewFile> = {}): ReviewFile {
     ...overrides,
   };
 }
+
+test("an explicit mixed-group toggle selects every member and clears them together", () => {
+  const files = [file({ id: 'ready' }), file({ id: 'linked', selected: false, evidence_sufficient: false }),
+    file({ id: 'weak', selected: false, confidence: 'insufficient' })];
+  assert.equal(isGroupIncluded(files, {}), false);
+  const enabled = toggleGroupSelection(files, {});
+  assert.equal(enabled.ready.accepted, true);
+  assert.equal(enabled.linked.accepted, true);
+  assert.equal(enabled.weak.accepted, true);
+  assert.equal(isGroupIncluded(files, enabled), true);
+  assert.equal(getFileReviewStatus(files[1], enabled.linked), 'attention');
+  const disabled = toggleGroupSelection(files, enabled);
+  assert.ok(files.every((item) => !disabled[item.id].accepted));
+  const manual = toggleGroupSelection(files, { ...disabled, linked: { ...disabled.linked, accepted: true } });
+  assert.equal(manual.linked.accepted, true);
+  assert.equal(manual.weak.accepted, true);
+  assert.equal(files[1].selected, false);
+});
+
+test("an entirely unreadable group can be explicitly included and excluded", () => {
+  const files = ['IMG_901.png', 'IMG_902.png', 'IMG_913.png', 'IMG_914.png'].map((name) => file({
+    id: name, name, target_path: 'Misc/Unreadable', selected: false,
+    evidence_sufficient: false, confidence: 'insufficient', extraction_status: 'unavailable',
+  }));
+  assert.equal(isGroupIncluded(files, {}), false);
+  const included = toggleGroupSelection(files, {});
+  assert.equal(isGroupIncluded(files, included), true);
+  assert.ok(files.every((item) => included[item.id].accepted));
+  assert.ok(files.every((item) => getFileReviewStatus(item, included[item.id]) === 'attention'));
+  const excluded = toggleGroupSelection(files, included);
+  assert.equal(isGroupIncluded(files, excluded), false);
+  assert.ok(files.every((item) => !excluded[item.id].accepted));
+  assert.ok(files.every((item) => !item.selected));
+});
+
+test("partial manual selection in a review group becomes all-selected on a group click", () => {
+  const files = [file({ id: 'a', selected: false }), file({ id: 'b', selected: false })];
+  const edits = { a: { accepted: true, target_path: 'Misc/General', destination_name: 'notes.txt' } };
+  assert.equal(isGroupIncluded(files, edits), false);
+  const included = toggleGroupSelection(files, edits);
+  assert.equal(isGroupIncluded(files, included), true);
+  assert.equal(included.a.target_path, 'Misc/General');
+  assert.equal(isGroupIncluded([], {}), false);
+});
 
 test("extension changes distinguish type corrections from ordinary and case-only renames", () => {
   assert.deepEqual(getFilenameExtensionChange("notes.html", "notes.csv"), { from: ".html", to: ".csv" });

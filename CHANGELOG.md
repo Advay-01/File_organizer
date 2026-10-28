@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.0.0 - 2026-10-28
+
+### Hybrid organization and chat
+
+- Added optional local semantic candidates with MiniLM as the default and Qwen 0.6B as an alternative. Settings offer explicit model downloads, availability/progress and automatic GPU or CPU-only inference through a separately installed Ollama. Neither models nor Ollama are bundled in the installer.
+- Kept the configurable 75-file automatic embedding gate, with off/forced modes for comparison. Embeddings supply candidates rather than final categories. The configured LLM continues to generate contextual folder/subfolder names and evidence-grounded filenames from the selected dataset.
+- Larger uncached datasets share a dynamic folder plan across bounded concurrent classification requests. Added timing counters and evaluation tooling; benchmark observations are documented separately from general accuracy claims.
+- Added deterministic language grouping for chat: CSS stays separate from HTML, and YAML from INI, using verified content formats. Chat also supports versioned naming preferences, proposed-folder selection and full-dataset topic resolution.
+- Preserved original dates and version tokens when shortening names. Corrected explicit folder switches to include or exclude every file in the group while preserving warnings and confirmation.
+
+### Privacy, formats and file safety
+
+- Improved detection of labelled passport numbers, grouped or ungrouped Aadhaar fields, and explicit card details whose numbers fail a checksum. Scientific constants and unrelated reference numbers remain excluded from card detection.
+- Redacted complete PEM private-key blocks, including flattened and truncated samples, before preparing outbound evidence. Added defensive outbound redaction and removed sensitive excerpts missed by older cache versions.
+- Improved non-executing format detection for Python, CSS, JavaScript, Markdown and YAML. CSV fallbacks can recognize valid JSON. Extension correction still requires strong local evidence and a grounded rename.
+- Retained identity/SHA-256 verification, project and path protections, no-overwrite behavior, cross-root Undo, partial failure recovery and history compatibility. Apply also validates literal local dependencies after preview edits.
+
+### History and downloads
+
+- Replaced history's flat move list with a folder tree. All folders start collapsed; opening a subfolder reveals its files, rename indicators and restoration status. Per-run Undo and partial-recovery retries remain available.
+- Published Windows x64 as `Sortly_2.0.0_windows-x64.zip`, containing the complete NSIS setup executable. Extract it and run `Sortly_2.0.0_x64-setup.exe`; it is an installer archive, not a portable app.
+- Retained Linux x64 `.deb`/AppImage and Apple Silicon macOS DMG packages. Native CI repeats backend/frontend tests, frozen-service checks and desktop startup checks. Publication requires every platform to pass and all release checksums, ZIP contents and versions to validate.
+
+### Validation scope
+
+- Final local verification passed 580 Python tests and 53 subtests, 27 frontend tests, TypeScript and the production build. On the synthetic 300-file fixture, all 45 planted sensitive files were detected with no false positives among the 255 ordinary files; all 30 planted format mismatches were recognized, and Apply/Undo preserved every original hash.
+- Local regression checks use generated temporary files. The supplied synthetic 300-file fixture is checked independently for local privacy detection, format detection, chat rules and Apply/Undo integrity; fixture-provider decisions do not measure LLM semantic accuracy.
+- Privacy detection remains heuristic over bounded extractable evidence. OCR tools are optional. Local embeddings do not prevent allowed passages from being sent to a configured cloud planner. Windows packages are unsigned; macOS uses ad-hoc signing without Apple notarization.
+- Implementation details and observed measurements: [hybrid accuracy fixes](docs/hybrid-accuracy-fixes.md) and [2.0 review fixes](docs/v2-review-fixes.md).
+
 ## 1.0.10 - 2026-10-27
 
 ### File safety and recovery

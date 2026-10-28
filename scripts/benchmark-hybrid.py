@@ -267,7 +267,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     with tempfile.TemporaryDirectory(prefix="sortly-hybrid-benchmark-") as runtime:
         state = Path(runtime)
         dataset = load_manifest(args.manifest.resolve()) if args.manifest else generated_dataset(state / "files", args.generated_files)
-        models = list(dict.fromkeys(args.embedding_model or ["qwen3-embedding:0.6b"]))
+        models = list(dict.fromkeys(args.embedding_model or ["all-minilm:22m"]))
         variants = [("baseline", False, False, models[0]), ("deterministic-reuse", True, False, models[0])]
         variants.extend((f"hybrid-{number}", True, True, model) for number, model in enumerate(models, 1))
         report = {

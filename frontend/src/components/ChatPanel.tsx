@@ -99,7 +99,7 @@ export default function ChatPanel({ disabled, busy, draft, messages, error, hasP
             {Boolean(message.rules?.length) && <details className="chat-rule-details">
               <summary>{message.rules!.length} plan {message.rules!.length === 1 ? "change" : "changes"}</summary>
               <ul>{message.rules!.map((rule, ruleIndex) => <li key={ruleIndex}>
-                {rule.action === "exclude" ? "Leave unchanged: " : rule.action === "rename" ? "Filenames: " : "Group: "}
+                {rule.action === "exclude" ? "Leave unchanged: " : rule.action === "rename" ? "Filenames: " : rule.action === "group_by_language" ? "Group by language: " : "Group: "}
                 {rule.match.topic ?? rule.match.extension ?? rule.match.glob ?? rule.match.folder}{rule.target ? ` → ${rule.target}` : ""}
                 {rule.action === "rename" && <>
                   {rule.naming?.enabled === false ? " · keep original names" : rule.naming?.enabled === true ? " · suggest supported names" : ""}

@@ -1,7 +1,9 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { AlertTriangle, Check, ChevronDown, FolderClock, LoaderCircle, RefreshCw, RotateCcw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson } from "../lib/api";
+import { buildHistoryTree, type HistoryMove } from "../lib/history";
+import HistoryTree from "./HistoryTree";
 import { Button } from "./ui/button";
 
 /**
@@ -24,14 +26,6 @@ interface Run {
   folder?: string;
 }
 
-interface Move {
-  from_name: string;
-  to_name: string;
-  folder: string;
-  renamed: boolean;
-  restored: boolean;
-}
-
 interface UndoResult {
   restored: number;
   skipped: { file: string; reason: string }[];
@@ -48,8 +42,6 @@ interface UndoNotice {
   tone: "success" | "warning";
   text: string;
 }
-
-const MAX_MOVES_SHOWN = 100;
 
 const STATUS_LABELS: Record<Status, string> = {
   applied: "Completed",
@@ -80,12 +72,14 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const [moves, setMoves] = useState<Move[]>([]);
+  const [moves, setMoves] = useState<HistoryMove[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<UndoNotice | null>(null);
   const detailRequest = useRef(0);
   const reducedMotion = useReducedMotion();
+  const openRun = runs?.find((run) => `${run.folder ?? folder ?? ""}#${run.id}` === open);
+  const tree = useMemo(() => buildHistoryTree(moves, openRun?.folder ?? folder ?? ""), [moves, openRun?.folder, folder]);
 
   const keyOf = (run: Run) => `${run.folder ?? folder ?? ""}#${run.id}`;
   const folderOf = (run: Run) => run.folder ?? folder ?? "";
@@ -124,7 +118,7 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
     setDetailLoading(true);
     setError(null);
     try {
-      const detail = await api<{ moves: Move[] }>(
+      const detail = await api<{ moves: HistoryMove[] }>(
         `${apiBase}/history/${run.id}?folder=${encodeURIComponent(folderOf(run))}`,
       );
       if (detailRequest.current === requestId) setMoves(detail.moves);
@@ -178,7 +172,7 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
         <div>
           <p className="ui-eyebrow text-ink-muted">Saved runs</p>
           <h2 id="history-panel-heading" className="history-title">Operation history</h2>
-          <p className="history-intro">Each run preserves its original move path so you can review before undoing.</p>
+          <p className="history-intro">Explore each run’s folder tree and safely undo its changes.</p>
         </div>
         <Button variant="secondary" size="sm" onClick={() => void load()}>
           <RefreshCw size={14} /> Refresh
@@ -263,29 +257,14 @@ export default function HistoryPanel({ folder, apiBase = "http://127.0.0.1:8765"
                     >
                       <div className="history-detail">
                         <div className="history-detail-heading">
-                          <span>Moves in this run</span>
-                          {!detailLoading && <span>{moves.length} shown</span>}
+                          <span>Folder tree</span>
+                          {!detailLoading && <span>{moves.length} files</span>}
                         </div>
                         {detailLoading && (
-                          <p className="history-detail-loading"><LoaderCircle size={14} className="animate-spin" /> Loading move details…</p>
+                          <p className="history-detail-loading"><LoaderCircle size={14} className="animate-spin" /> Loading folder tree…</p>
                         )}
                         {!detailLoading && moves.length === 0 && <p className="history-muted">No move details were returned for this run.</p>}
-                        {moves.length > 0 && (
-                          <ul className="history-moves">
-                            {moves.slice(0, MAX_MOVES_SHOWN).map((move, index) => (
-                              <li key={`${move.from_name}-${move.to_name}-${index}`} data-restored={move.restored}>
-                                <span className="history-move-name">{move.from_name}</span>
-                                <span className="history-move-arrow" aria-hidden="true">→</span>
-                                <span className="history-move-name">{move.folder === "." ? "" : `${move.folder}/`}{move.to_name}</span>
-                                {move.renamed && <span className="history-chip">renamed</span>}
-                                {move.restored && <span className="history-chip" data-tone="muted">restored</span>}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {moves.length > MAX_MOVES_SHOWN && (
-                          <p className="history-muted">Showing the first {MAX_MOVES_SHOWN} of {moves.length} recorded moves.</p>
-                        )}
+                        {moves.length > 0 && <HistoryTree tree={tree} />}
                         {run.status !== "undone" && run.status !== "abandoned" && (
                           <div className="history-detail-footer">
                             <p>Undo only moves files still present at their recorded destinations. Other items are skipped safely.</p>

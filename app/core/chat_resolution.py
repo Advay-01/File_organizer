@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 RESOLVER_VERSION = 1
 TOPIC_MAX_CHARS = 48_000
-_FILE_FIELDS = ("path", "extension", "destination_name", "target", "reason", "evidence")
+_FILE_FIELDS = ("path", "extension", "language", "destination_name", "target", "reason", "evidence")
 _RULE_FIELDS = ("version", "action", "target", "reason")
 
 

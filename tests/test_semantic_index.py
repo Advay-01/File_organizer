@@ -57,7 +57,7 @@ def local_server(**changes):
                 self.end_headers()
                 return
             self.send_json({"models": state["models"] if state["models"] is not None else [
-                {"name": "qwen3-embedding:0.6b", "digest": state["digest"]},
+                {"name": "all-minilm:22m", "digest": state["digest"]},
             ]})
 
         def do_POST(self):
@@ -177,7 +177,7 @@ def test_missing_model_never_triggers_download_or_embedding_request(tmp_path):
 @pytest.mark.parametrize("extra", [{"remote_host": "https://cloud.example"}, {"remote_model": "hosted-model"},
                                   {"digest": "not-a-model-digest"}])
 def test_cloud_or_unversioned_model_is_not_used(extra):
-    with local_server(models=[{"name": "qwen3-embedding:0.6b", "digest": "a" * 64, **extra}]) as (state, url):
+    with local_server(models=[{"name": "all-minilm:22m", "digest": "a" * 64, **extra}]) as (state, url):
         with pytest.raises(SemanticError):
             LocalEmbeddingClient(SemanticConfig(base_url=url))
     assert all(request[0] == "GET" for request in state["requests"])
@@ -355,8 +355,8 @@ def test_input_and_query_budgets_are_bounded(tmp_path):
 
 
 def test_qwen_queries_receive_instruction_prefix_without_changing_documents():
-    with local_server() as (state, url):
-        client = LocalEmbeddingClient(SemanticConfig(base_url=url))
+    with local_server(models=[{"name": "qwen3-embedding:0.6b", "digest": "a" * 64}]) as (state, url):
+        client = LocalEmbeddingClient(SemanticConfig(base_url=url, model="qwen3-embedding:0.6b"))
         client.embed(["Physics lecture"], task="document")
         client.embed(["physics exercises"], task="query")
     inputs = [request[2]["input"][0] for request in state["requests"] if request[0] == "POST"]

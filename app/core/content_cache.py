@@ -13,7 +13,7 @@ from app.core.evidence import EvidenceBundle
 from app.core.privacy import detect_sensitive, redact_sensitive
 from app.models.schemas import FileInfo
 
-CACHE_VERSION = 15
+CACHE_VERSION = 17
 DEFAULT_DB = Path(os.environ.get("ORGANIZER_CACHE_DB", Path.home() / ".file_organizer" / "cache.db"))
 
 
@@ -30,7 +30,35 @@ class ContentIntelligenceCache:
             "CREATE TABLE IF NOT EXISTS intelligence_cache ("
             "cache_key TEXT PRIMARY KEY, version INTEGER NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL)"
         )
+        self._purge_legacy_sensitive_evidence()
         self._db.commit()
+
+    def _purge_legacy_sensitive_evidence(self) -> None:
+        """Remove excerpts missed by older detectors once per database."""
+        self._db.execute("CREATE TABLE IF NOT EXISTS cache_migrations (name TEXT PRIMARY KEY)")
+        migration = "privacy-identities-and-pem-v1"
+        if self._db.execute("SELECT 1 FROM cache_migrations WHERE name = ?", (migration,)).fetchone():
+            return
+        self._db.execute("PRAGMA secure_delete = ON")
+        for table, key_column in (("evidence_cache", "fingerprint"), ("intelligence_cache", "cache_key")):
+            for key, payload in self._db.execute(f"SELECT {key_column}, payload FROM {table}").fetchall():
+                try:
+                    value = json.loads(payload)
+                    # Decode escaped JSON strings before detection, without
+                    # retaining identifiers in logs or migration diagnostics.
+                    def strings(item):
+                        if isinstance(item, dict):
+                            return " ".join(f"{name}: {strings(child)}" for name, child in item.items())
+                        if isinstance(item, list):
+                            return " ".join(strings(child) for child in item)
+                        return str(item or "")
+                    context = [str(value.get("filename", "")), str(value.get("parent_directory", "")), str(value.get("metadata", ""))] if isinstance(value, dict) else []
+                    sensitive = bool(detect_sensitive(strings(value), context))
+                except (TypeError, ValueError):
+                    sensitive = True
+                if sensitive:
+                    self._db.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
+        self._db.execute("INSERT INTO cache_migrations(name) VALUES (?)", (migration,))
 
     def get_evidence(self, fingerprint: str, extension: str | None = None) -> EvidenceBundle | None:
         if not fingerprint:
@@ -59,6 +87,12 @@ class ContentIntelligenceCache:
         if not evidence.fingerprint:
             return
         key = f"{evidence.fingerprint}:{evidence.extension.lower()}"
+        if evidence.sensitive or detect_sensitive(
+            evidence.content, [evidence.filename, evidence.parent_directory, *map(str, evidence.metadata.values())],
+        ):
+            self._db.execute("DELETE FROM evidence_cache WHERE fingerprint = ?", (key,))
+            self._db.commit()
+            return
         self._db.execute(
             "INSERT OR REPLACE INTO evidence_cache(fingerprint, version, payload, created) VALUES (?, ?, ?, ?)",
             (key, CACHE_VERSION, evidence.to_json(), time.time()),
@@ -160,5 +194,5 @@ def refresh_evidence_identity(evidence: EvidenceBundle, file: FileInfo) -> Evide
         parent_directory=path.parent.name,
         warnings=warnings,
         sensitive_findings=[finding.to_dict() for finding in findings],
-        redacted_content=redact_sensitive(evidence.content),
+        redacted_content=redact_sensitive(evidence.content, [path.name, path.parent.name, *map(str, evidence.metadata.values())]),
     )

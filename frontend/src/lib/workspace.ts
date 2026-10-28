@@ -1,6 +1,6 @@
 export type ChatRule = {
   version?: 1;
-  action: "move" | "exclude" | "rename";
+  action: "move" | "exclude" | "rename" | "group_by_language";
   match: { topic?: string | null; extension?: string | null; glob?: string | null; folder?: string | null };
   target: string | null;
   reason: string;

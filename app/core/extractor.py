@@ -5,6 +5,7 @@ Image files contribute their format, dimensions, and available EXIF description.
 """
 from __future__ import annotations
 
+import ast
 import codecs
 import csv
 import gzip
@@ -182,6 +183,14 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
         return FormatDetection(".sh", "high", ("shell shebang",))
     if PRIVATE_KEY_MARKER.search(value):
         return FormatDetection(".pem", "high", ("PEM private-key header",))
+    if re.search(r"(?m)^(?:async[ \t]+)?(?:def[ \t]+\w+[ \t]*\(|class[ \t]+\w+|from[ \t]+[\w.]+[ \t]+import\b|import[ \t]+[\w.]+)", value):
+        try:
+            module = ast.parse(value)
+        except (SyntaxError, ValueError, RecursionError):
+            pass
+        else:
+            if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)) for node in module.body):
+                return FormatDetection(".py", "high", ("parsed Python syntax and code declarations",))
     if HTML_MARKER.search(value):
         return FormatDetection(".html", "high", ("HTML document markup",))
     if re.match(r"(?is)^<svg(?:\s|>)", value):
@@ -202,6 +211,16 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
             return FormatDetection(".xml", "high", ("valid XML document",))
         except (ElementTree.ParseError, RecursionError, LookupError, ValueError):
             pass
+
+    css_value = re.sub(r"/\*.*?\*/", "", value, flags=re.S)
+    css_rules = re.findall(r"(?:^|[}\n])[ \t]*[^{}\n]+\{([^{}]+)\}", css_value)
+    css_properties = sum(len(re.findall(r"(?:^|;)[ \t\r\n]*(?:--[\w-]+|[a-z][a-z-]*)[ \t]*:[^;{}]+", rule)) for rule in css_rules)
+    if css_rules and css_properties >= 2 and not re.search(r"\b(?:const|function|return|var|let)\b", css_value):
+        return FormatDetection(".css", "high", ("CSS rules and multiple property declarations",))
+    if re.search(r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=", value) and re.search(
+        r"\bfunction\s*[A-Za-z_$]*\s*\(|=>|\b(?:export|import)\b", value,
+    ):
+        return FormatDetection(".js", "high", ("JavaScript declarations and function/module syntax",))
 
     if TERRAFORM_BLOCK.search(value):
         return FormatDetection(".tf", "high", ("Terraform/HCL block syntax",))
@@ -235,6 +254,18 @@ def detect_text_format(text: str, allow_generic_text: bool = False) -> FormatDet
         return FormatDetection(".toml", "medium", ("TOML-style table header",))
     if has_typed_toml and len(env_assignments) >= 2:
         return FormatDetection(".toml", "medium", ("typed key/value configuration",))
+    yaml_keys = re.findall(r"(?m)^[ \t]*([A-Za-z_][\w-]*):[ \t]*(?:[^\s].*)?\r?$", value)
+    if len(set(yaml_keys)) >= 3 and (
+        re.search(r"(?m)^[ \t]+[A-Za-z_][\w-]*:", value)
+        or re.search(r"(?im):[ \t]*(?:true|false|null|\d+)[ \t]*\r?$", value)
+    ):
+        return FormatDetection(".yaml", "high", ("YAML keys with nested or typed values",))
+    if re.search(r"(?m)^#{1,6}[ \t]+\S", value) and (
+        len(re.findall(r"(?m)^[ \t]*(?:[-*+]|\d+\.)[ \t]+\S", value)) >= 2
+        or re.search(r"(?m)^```[^\n]*\n", value)
+        or re.search(r"\[[^\]\n]+\]\([^)\n]+\)", value)
+    ):
+        return FormatDetection(".md", "high", ("Markdown headings and structured markup",))
 
     sql_signals = sum(bool(pattern.search(value)) for pattern in SQL_MARKERS)
     if sql_signals:
@@ -463,8 +494,10 @@ def extract_content(path: str, max_chars: int = 600) -> ContentExtraction:
 
         if ext == ".csv":
             raw = _read_text(p, max_chars)
-            detection = _csv_detection(raw)
-            if detection is None:
+            # Sniff the complete bounded sample first: pretty-printed JSON can
+            # resemble delimited rows to the CSV sniffer.
+            detection = detect_text_format(raw)
+            if detection.extension == "unknown":
                 return ContentExtraction(
                     text=_clean(raw, max_chars),
                     parser_status="fallback",
@@ -472,7 +505,13 @@ def extract_content(path: str, max_chars: int = 600) -> ContentExtraction:
                     detection_confidence="unknown",
                     warning="CSV structure was uncertain; bounded text was retained.",
                 )
-            return _parsed_content(raw, max_chars, ".csv", detection.signals)
+            return ContentExtraction(
+                text=_clean(raw, max_chars),
+                parser_status="parsed" if detection.extension == ".csv" else "fallback",
+                detected_type=detection.extension, detection_confidence=detection.confidence,
+                signals=detection.signals,
+                warning="" if detection.extension == ".csv" else "CSV extension disagreed with the detected text format.",
+            )
 
         if ext in TEXT_EXTS:
             raw = _read_text(p, max_chars)

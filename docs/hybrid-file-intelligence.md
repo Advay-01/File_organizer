@@ -16,9 +16,12 @@ taxonomy and no automatic file movement through chat.
    match, renaming is off, and explicit instructions do not distinguish the copies.
 5. If enabled and at least 75 unresolved representative files remain, build local
    semantic vectors and suggest neighbours. Otherwise use direct evidence cards.
-6. Order related candidates together and supply bounded, batch-local relationship
-   hints to the existing LLM planner. Every nonduplicate file still receives its own
-   validated subject/purpose decision and per-file naming evidence.
+6. For at least 16 unresolved files, ask the same LLM for one bounded dataset-derived
+   folder plan describing both subject and purpose. Classify files in up to two
+   concurrent batches against that shared plan, with bounded local relationship
+   hints. Local chat inference remains sequential. If planning fails, report a
+   warning and use the existing sequential path. Custom completion hooks can inject
+   the folder-planning stage separately using `folder_completion_fn`.
 7. Let chat refine a saved preview through structured, versioned rules. Apply remains
    explicit and goes through the existing path, fingerprint, and journal checks.
 
@@ -29,7 +32,7 @@ an installed local model is deliberately configured. Missing/invalid local model
 produce a visible analysis warning and fall back to ordinary evidence planning.
 
 This version intentionally uses simple nearest-neighbour candidates. UMAP,
-HDBSCAN, a graph database, cross-encoders, and a second taxonomy-planning model
+HDBSCAN, a graph database, cross-encoders, and a separate taxonomy-planning model
 are not required. Candidate lookups have a bounded work budget, and similarity
 scores are not displayed as calibrated confidence percentages.
 
@@ -61,10 +64,31 @@ Example development configuration in `.env`:
 ```dotenv
 ORGANIZER_SEMANTIC_ENABLED=1
 ORGANIZER_EMBEDDING_BASE_URL=http://127.0.0.1:11434
-ORGANIZER_EMBEDDING_MODEL=qwen3-embedding:0.6b
+ORGANIZER_EMBEDDING_MODEL=all-minilm:22m
 ORGANIZER_EMBEDDING_MIN_FILES=75
 ORGANIZER_EMBEDDING_MAX_CHARS=12000
+ORGANIZER_CONTENT_CONCURRENCY=2
 ```
+
+The desktop/browser app also exposes **Settings > Local embeddings**: an enable
+switch, MiniLM/Qwen selector, separate download button, and Automatic (GPU when
+supported) or CPU-only acceleration. Saved app preferences in
+`~/.file_organizer/embeddings.json` (or `ORGANIZER_HOME`) override the app's default
+enabled/model/device values and take effect on the next analysis. Other budgets
+remain environment-configured. CLI and benchmark environment settings remain
+independent of saved UI preferences.
+
+Both models require a separately installed, running Ollama service. If missing,
+Settings shows an installation link and connection check; ordinary LLM planning
+remains available. Model discovery never downloads weights. Downloads start only
+on an explicit button click, are limited to the two supported model IDs, stream
+progress, and verify the installed digest before reporting completion. Only the
+model ID is sent to the local download endpoint, not document evidence. Models
+are stored by Ollama separately from Sortly; GPU libraries are likewise provided
+by Ollama, not added to the `.exe`. Automatic mode lets Ollama use a supported GPU;
+CPU-only sends `num_gpu=0`. The UI reports observed GPU/CPU memory use from running
+models, or says that the model has not loaded yet; it does not guess GPU availability.
+No fine-tuned weights or training pipeline is included.
 
 Only loopback endpoints are permitted. Redirects and HTTP proxies are disabled;
 cloud model entries are rejected. Installed model digests are checked so retagged
@@ -72,6 +96,24 @@ models invalidate vector caches. Cache keys distinguish evidence, extractor/inpu
 version, model identity, and document/query tasks. Filename/folder label edits do
 not recompute content-derived vectors. Sensitive or weak evidence is excluded,
 and potentially sensitive user-query vectors are not persisted.
+
+MiniLM is the lighter default when embeddings are explicitly enabled. Its short
+context receives compact cards of at most 480 characters; longer queries fall back
+to ordinary rule resolution. Qwen remains selectable with
+`ORGANIZER_EMBEDDING_MODEL=qwen3-embedding:0.6b`, particularly for supported GPU
+hardware. No model is installed or selected based solely on a device-name guess.
+
+Dates and version tokens are preserved locally in grounded rename suggestions,
+including chat name limits. Initial review exclusions remain in place until the user
+changes them. A group switch explicitly includes or excludes every member, with
+review warnings preserved; its state reflects every checkbox. Per-file choices
+remain editable. Apply checks local references after edits and
+rejects plans that rename/move a referenced asset without preserving the reference.
+Dependency bundles remain subject to the ordinary partial-failure/Undo recovery.
+Path validation still runs before/after directory creation and after hashing;
+canonical containment and bounded ancestor walks avoid repeated path resolution
+inside each pass. Analysis timing/status counters and executor duration are stored
+with new history records, without storing folder-planning evidence text.
 
 Candidates to compare on reviewed folders include
 [all-minilm](https://ollama.com/library/all-minilm),

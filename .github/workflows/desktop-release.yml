@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/multiplatform-release]
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -142,5 +143,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          python scripts/verify-release-artifacts.py release-assets
           python scripts/release-notes.py "$RELEASE_TAG" > release-notes.md
           gh release create "$RELEASE_TAG" --verify-tag --title "Sortly $RELEASE_TAG" --notes-file release-notes.md release-assets/*

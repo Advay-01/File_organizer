@@ -36,6 +36,13 @@ API_KEY_PATTERNS = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
 )
 PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?P<label>[A-Z ]*PRIVATE KEY)-----.*?"
+    r"(?:-----END (?P=label)-----|\Z)", re.S,
+)
+IDENTITY_CONTEXT = re.compile(r"\b(?:(?:aadhaar|aadhar|uidai)(?:[ _-]*(?:number|no|id))?|government[ _-]?id)\b", re.I)
+PASSPORT_CONTEXT = re.compile(r"\bpassport(?:[ _-]*(?:number|no|id))?\b", re.I)
+PASSPORT_NUMBER = re.compile(r"(?<![A-Z0-9])[A-Z][0-9]{7}(?![A-Z0-9])", re.I)
 CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?im)^(?P<prefix>[ \t]*(?:export[ \t]+)?)"
     r"(?P<key>[A-Za-z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY)"
@@ -207,10 +214,16 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
         signals = []
         if re.fullmatch(r"\d{4}[ -]\d{4}[ -]\d{4}", value):
             signals.append("4-4-4 grouping")
-        if any(term in lowered for term in ("aadhaar", "uidai", "government id")):
+        nearby = haystack[max(0, match.start() - 100):match.end() + 100]
+        if IDENTITY_CONTEXT.search(nearby) or IDENTITY_CONTEXT.search((text or "").splitlines()[0] if text else "") or any(IDENTITY_CONTEXT.search(value) for value in metadata_values):
             signals.append("identity context")
-        if len(signals) >= 2:
+        if "identity context" in signals:
             findings.append(SensitiveFinding("likely_aadhaar", tuple(signals)))
+            break
+    for match in PASSPORT_NUMBER.finditer(haystack):
+        nearby = haystack[max(0, match.start() - 100):match.end() + 100]
+        if PASSPORT_CONTEXT.search(nearby) or any(PASSPORT_CONTEXT.search(value) for value in metadata_values):
+            findings.append(SensitiveFinding("likely_passport", ("passport number format", "passport context")))
             break
     if PAN_PATTERN.search(haystack):
         signals = ["PAN format"]
@@ -221,8 +234,11 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
     metadata_card_context = bool(CARD_CONTEXT.search(" ".join(metadata_values).replace("_", " ")))
     for match in CARD_CANDIDATE.finditer(haystack):
         nearby = haystack[max(0, match.start() - 180):match.end() + 180]
-        if luhn_valid(match.group(0)) and (metadata_card_context or CARD_CONTEXT.search(nearby)):
-            signals = ["Luhn valid", "payment-card context"]
+        if metadata_card_context or CARD_CONTEXT.search(nearby):
+            # Explicitly labelled card details remain private even when mistyped
+            # or synthetic numbers fail a checksum. Numeric boundaries above
+            # still exclude decimal constants and scientific notation.
+            signals = ["Luhn valid" if luhn_valid(match.group(0)) else "card-length number", "payment-card context"]
             findings.append(SensitiveFinding("likely_payment_card", tuple(signals)))
             break
 
@@ -254,9 +270,10 @@ def detect_sensitive(text: str, metadata: Iterable[str] = ()) -> List[SensitiveF
     return findings
 
 
-def redact_sensitive(text: str) -> str:
+def redact_sensitive(text: str, metadata: Iterable[str] = ()) -> str:
     """Mask likely identifiers and credentials; exact matches never enter diagnostics."""
     result = text or ""
+    context = " ".join(str(value).replace("_", " ") for value in metadata)
     def redact_assignment(match: re.Match) -> str:
         if not _credential_value_is_meaningful(match):
             return match.group(0)
@@ -265,17 +282,25 @@ def redact_sensitive(text: str) -> str:
             f"{match.group('separator')} [REDACTED SECRET]"
         )
 
+    # Redact before flattening/truncation. A missing footer can be caused by
+    # bounded extraction; withhold the rest of that sample rather than leak it.
+    result = PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY]", result)
     result = CREDENTIAL_ASSIGNMENT.sub(redact_assignment, result)
-    result = PRIVATE_KEY_PATTERN.sub("[REDACTED PRIVATE KEY HEADER]", result)
     for pattern in API_KEY_PATTERNS:
         result = pattern.sub("[REDACTED API KEY]", result)
     result = PAN_PATTERN.sub("[REDACTED PAN]", result)
+    def passport(match: re.Match) -> str:
+        nearby = result[max(0, match.start() - 100):match.end() + 100]
+        return "[REDACTED PASSPORT]" if PASSPORT_CONTEXT.search(nearby) or PASSPORT_CONTEXT.search(context) else match.group(0)
+
+    result = PASSPORT_NUMBER.sub(passport, result)
     result = AADHAAR_PATTERN.sub(
         lambda match: "[REDACTED AADHAAR]" if len(re.findall(r"\d", match.group(0))) == 12 else match.group(0),
         result,
     )
 
     def card(match: re.Match) -> str:
-        return "[REDACTED PAYMENT CARD]" if luhn_valid(match.group(0)) else match.group(0)
+        nearby = result[max(0, match.start() - 180):match.end() + 180]
+        return "[REDACTED PAYMENT CARD]" if luhn_valid(match.group(0)) or CARD_CONTEXT.search(nearby) or CARD_CONTEXT.search(context) else match.group(0)
 
     return CARD_CANDIDATE.sub(card, result)

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 from uuid import uuid4
+from time import perf_counter
 
 from app.core.history import (
     UndoLogError,
@@ -92,6 +93,7 @@ def execute_plan(
     output_root: str,
     dry_run: bool = True,
     source_root: str | None = None,
+    analysis_stats: dict | None = None,
 ) -> ExecutionResult:
     """Move files through a durable per-run undo journal.
 
@@ -100,6 +102,7 @@ def execute_plan(
     journal persistence fails, no additional destructive operation is attempted.
     The returned list contains only files that were actually moved.
     """
+    started = perf_counter()
     result = ExecutionResult()
     selected = [
         m
@@ -160,6 +163,14 @@ def execute_plan(
         "moves": journal_moves,
         "failures": list(result.failures),
     }
+    if analysis_stats is not None:
+        entry["analysis_stats"] = {
+            key: value for key, value in analysis_stats.items()
+            if type(value) in {str, int, float, bool} and (
+                key.startswith(("embedding_", "llm_", "folder_plan_"))
+                or key in {"files", "cache_hits", "extraction_seconds", "scan_seconds", "total_seconds", "classification_workers"}
+            )
+        }
     try:
         _append_run(output_root, entry)
         result.undo_available = True
@@ -215,6 +226,7 @@ def execute_plan(
         "partial" if result.moved else "failed"
     )
     entry["failures"] = list(result.failures)
+    entry["execution_stats"] = {"apply_seconds": round(perf_counter() - started, 4)}
     try:
         _update_run(output_root, entry)
     except UndoLogError as error:

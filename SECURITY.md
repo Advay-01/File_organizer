@@ -6,8 +6,8 @@ Sortly is currently under active development. Security fixes are prioritized for
 
 | Version | Supported |
 | ------- | --------- |
-| 1.0.10   | ✅ |
-| < 1.0.10 | ❌ |
+| 2.0.0    | ✅ |
+| < 2.0.0  | ❌ |
 
 Please update to the latest supported version before reporting an issue, where possible.
 

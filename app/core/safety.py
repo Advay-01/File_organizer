@@ -227,15 +227,37 @@ def is_partial_download(path: Path) -> bool:
     return name.startswith(("~$", ".~")) or name.endswith(PARTIAL_SUFFIXES)
 
 
+def _parents_within(path: Path, boundary: Path) -> Iterable[Path]:
+    """Bound the common canonical-root case without resolving every ancestor.
+
+    These are fresh paths, not cached safety approvals. Alias/relative paths
+    retain the resolving fallback, including reparse-point checks on raw paths.
+    """
+    absolute = path.absolute()
+    if absolute == boundary:
+        return
+    if ".." not in absolute.parts and absolute.is_relative_to(boundary):
+        for parent in absolute.parents:
+            yield parent
+            if parent == boundary:
+                break
+    else:
+        for parent in path.parents:
+            if resolved_inside(parent, boundary):
+                yield parent
+
+
 def validate_move_paths(
     source: Path,
     destination: Path,
     output_root: Path,
     source_root: Path | None = None,
 ) -> None:
+    output_exists = True
     try:
         root = assert_safe_root(output_root)
     except FileNotFoundError:
+        output_exists = False
         root = output_root.expanduser().resolve(strict=False)
         if (
             any(part.casefold() in PROTECTED_NAMES for part in root.parts)
@@ -244,26 +266,31 @@ def validate_move_paths(
                    for parent in root.parents)
         ):
             raise UnsafePathError("The approved output root is in a protected or reparse-point location.")
-    approved_source_root = assert_safe_root(source_root or output_root)
+    # Same-root moves need one fresh approval per pass, rather than approving
+    # the identical directory twice. Cross-root approvals remain independent.
+    source_boundary = source_root or output_root
+    approved_source_root = root if (
+        output_exists and source_boundary.expanduser().absolute() == output_root.expanduser().absolute()
+    ) else assert_safe_root(source_boundary)
     try:
         source_resolved = source.resolve(strict=True)
         destination_resolved = destination.resolve(strict=False)
     except (OSError, RuntimeError) as error:
         raise UnsafePathError(f"Could not resolve file operation path: {error}") from error
-    if not resolved_inside(source_resolved, approved_source_root):
+    if not source_resolved.is_relative_to(approved_source_root):
         raise UnsafePathError("Source file resolves outside its approved root.")
-    if not resolved_inside(destination_resolved, root):
+    if not destination_resolved.is_relative_to(root):
         raise UnsafePathError("Destination resolves outside the approved root.")
     if not source_resolved.is_file():
         raise UnsafePathError("Source is not a regular file.")
+    source_parents = tuple(_parents_within(source, approved_source_root))
+    destination_parents = tuple(_parents_within(destination, root))
     if is_reparse_point(source) or any(
         parent.exists() and is_reparse_point(parent)
-        for parent in source.parents
-        if resolved_inside(parent, approved_source_root)
+        for parent in source_parents
     ) or (destination.exists() and is_reparse_point(destination)) or any(
         parent.exists() and is_reparse_point(parent)
-        for parent in destination.parents
-        if resolved_inside(parent, root)
+        for parent in destination_parents
     ):
         raise UnsafePathError("File operations may not traverse symlinks or junctions.")
     relative_parts = destination_resolved.relative_to(root).parts
@@ -274,11 +301,12 @@ def validate_move_paths(
     source_parts = source_resolved.relative_to(approved_source_root).parts
     if any(part.casefold() in PROTECTED_NAMES for part in source_parts):
         raise UnsafePathError("Source uses a protected directory name.")
-    for path, boundary in ((source.parent, approved_source_root), (destination.parent, root)):
-        while path != boundary and resolved_inside(path, boundary):
+    for parents, boundary in ((source_parents, approved_source_root), (destination_parents, root)):
+        for path in parents:
+            if path == boundary:
+                continue
             if any((path / marker).exists() for marker in PROJECT_MARKERS):
                 raise UnsafePathError("File operations may not enter a software project.")
-            path = path.parent
 
 
 def _rename_no_replace(source: Path, destination: Path) -> None:

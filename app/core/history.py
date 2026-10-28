@@ -249,7 +249,8 @@ def get_run(output_root: str, run_id: int) -> dict:
         "restored": bool(m.get("restored")),
     } for m in _moves(entry, output_root)]
     return {"id": run_id, "time": entry.get("time", ""), "status": _status(entry, output_root),
-            "undone_at": entry.get("undone_at"), "moves": moves}
+            "undone_at": entry.get("undone_at"), "moves": moves,
+            "analysis_stats": entry.get("analysis_stats", {}), "execution_stats": entry.get("execution_stats", {})}
 
 
 def undo_run(output_root: str, run_id: int) -> Dict[str, object]:

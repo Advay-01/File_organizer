@@ -23,6 +23,22 @@ export type ReviewEdit = {
   destination_name: string;
 };
 
+export function isGroupIncluded(files: ReviewFile[], edits: Record<string, ReviewEdit>): boolean {
+  return files.length > 0 && files.every((file) => currentEdit(file, edits[file.id]).accepted);
+}
+
+export function toggleGroupSelection(files: ReviewFile[], edits: Record<string, ReviewEdit>): Record<string, ReviewEdit> {
+  const allIncluded = isGroupIncluded(files, edits);
+  const next = { ...edits };
+  for (const file of files) {
+    const current = currentEdit(file, edits[file.id]);
+    // This is an explicit user choice for the whole destination group. Keep
+    // initial review exclusions and warnings; only change the preview selection.
+    next[file.id] = { ...current, accepted: !allIncluded };
+  }
+  return next;
+}
+
 export function getFilenameExtensionChange(original: string, proposed: string): { from: string; to: string } | null {
   function extension(name: string): string {
     const dot = name.lastIndexOf(".");

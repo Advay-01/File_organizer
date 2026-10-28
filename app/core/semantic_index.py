@@ -39,13 +39,16 @@ class SemanticError(ValueError):
 class SemanticConfig:
     enabled: bool = False
     base_url: str = "http://127.0.0.1:11434"
-    model: str = "qwen3-embedding:0.6b"
+    model: str = "all-minilm:22m"
     min_files: int = 75
     batch_size: int = 16
     max_input_chars: int = 12000
     timeout: float = 10.0
+    device: str = "auto"
 
     def __post_init__(self) -> None:
+        if self.device not in {"auto", "cpu"}:
+            raise ValueError("Embedding acceleration must be automatic or CPU only.")
         if not 0 <= self.min_files <= 100000:
             raise ValueError("Embedding minimum file count is outside its supported range.")
         if not 1 <= self.batch_size <= 64 or not 64 <= self.max_input_chars <= 32000:
@@ -60,11 +63,12 @@ class SemanticConfig:
         return cls(
             enabled=os.getenv("ORGANIZER_SEMANTIC_ENABLED", "0").lower() in {"1", "true", "yes"},
             base_url=os.getenv("ORGANIZER_EMBEDDING_BASE_URL", "http://127.0.0.1:11434"),
-            model=os.getenv("ORGANIZER_EMBEDDING_MODEL", "qwen3-embedding:0.6b"),
+            model=os.getenv("ORGANIZER_EMBEDDING_MODEL", "all-minilm:22m"),
             min_files=int(os.getenv("ORGANIZER_EMBEDDING_MIN_FILES", "75")),
             batch_size=int(os.getenv("ORGANIZER_EMBEDDING_BATCH_SIZE", "16")),
             max_input_chars=int(os.getenv("ORGANIZER_EMBEDDING_MAX_CHARS", "12000")),
             timeout=float(os.getenv("ORGANIZER_EMBEDDING_TIMEOUT", "10")),
+            device=os.getenv("ORGANIZER_EMBEDDING_DEVICE", "auto"),
         )
 
 
@@ -152,9 +156,12 @@ class LocalEmbeddingClient:
         if task == "query" and "qwen" in self.config.model.lower():
             inputs = [f"Instruct: {_QUERY_INSTRUCTION}\nQuery: {text}" for text in texts]
         started = time.perf_counter()
-        result = self._request("/api/embed", {
+        payload = {
             "model": self.config.model, "input": inputs, "truncate": False, "keep_alive": "5m",
-        })
+        }
+        if self.config.device == 'cpu':
+            payload['options'] = {"num_gpu": 0}
+        result = self._request("/api/embed", payload)
         self.inference_seconds += time.perf_counter() - started
         if self._installed_identity() != self.model_identity:
             raise SemanticError("The embedding model changed while computing vectors.")
@@ -191,6 +198,12 @@ def _document_text(evidence: EvidenceBundle, limit: int) -> str:
                          ("title", "subject", "keywords", "description", "headings")
                          if evidence.metadata.get(key))
     return f"{metadata}\n{evidence.content}".strip()[:limit]
+
+
+def _input_limit(config: SemanticConfig) -> int:
+    # MiniLM has a short context. Compact character-bounded cards fit its
+    # WordPiece budget without asking Ollama to silently truncate evidence.
+    return min(config.max_input_chars, 480) if 'all-minilm' in config.model.lower() else config.max_input_chars
 
 
 class _EmbeddingCache:
@@ -265,7 +278,7 @@ class SemanticIndex:
                     sensitive_ids.add(item_id)
                 if sensitive or evidence.extraction_status != "sufficient" or not evidence.fingerprint:
                     continue
-                text = _document_text(evidence, index._config.max_input_chars)
+                text = _document_text(evidence, _input_limit(index._config))
                 if text:
                     cards[item_id] = text
             index.stats["embedding_excluded_sensitive"] = len(sensitive_ids)
@@ -321,6 +334,7 @@ class SemanticIndex:
                 index.stats["embedding_cache_seconds"] += time.perf_counter() - cache_started
             index.vectors = {item_id: vectors[key] for item_id, key in keys.items()}
             index.stats.update(embedding_status="ready", embedding_model=index._config.model,
+                               embedding_device=index._config.device,
                                embedding_model_identity=index._identity,
                                embedding_documents=len(index.vectors),
                                embedding_dimensions=len(next(iter(index.vectors.values()))))
@@ -369,7 +383,7 @@ class SemanticIndex:
         """Rank the complete allowed universe unless an explicit limit is supplied."""
         if not self.vectors or not isinstance(query, str) or not query.strip():
             return []
-        if len(query) > self._config.max_input_chars:
+        if len(query) > _input_limit(self._config):
             self.warnings.append("Semantic query exceeds its input budget; ordinary rule resolution is required.")
             return []
         ids = set(self.vectors) if allowed_ids is None else set(allowed_ids) & set(self.vectors)

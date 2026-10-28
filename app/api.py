@@ -18,8 +18,9 @@ import subprocess
 import sys
 from threading import Lock
 from time import perf_counter
-from typing import Dict, List
+from typing import Dict, List, Literal
 from uuid import uuid4
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -29,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.core import history, provider_catalog, provider_store
+from app.core import embedding_settings
 from app.core import chat as chat_engine
 from app.core.chat_resolution import parser_context, resolve_topic
 from app.core.semantic_index import SemanticConfig, SemanticIndex
@@ -177,6 +179,18 @@ class ProviderConfigRequest(BaseModel):
     primary: str
     fallbacks: List[str] = Field(default_factory=list)
     connections: Dict[str, ProviderConnectionRequest] = Field(default_factory=dict)
+
+
+class EmbeddingConfigRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    enabled: bool = Field(strict=True)
+    model: Literal["all-minilm:22m", "qwen3-embedding:0.6b"]
+    device: Literal["auto", "cpu"] = "auto"
+
+
+class EmbeddingDownloadRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    model: Literal["all-minilm:22m", "qwen3-embedding:0.6b"]
 
 
 class ModelDiscoveryRequest(BaseModel):
@@ -485,6 +499,36 @@ def provider_config() -> dict:
     return provider_store.public_config()
 
 
+@app.get("/api/embeddings/config")
+def embedding_config() -> dict:
+    try:
+        return embedding_settings.public_state()
+    except (ValueError, OSError) as error:
+        raise HTTPException(503, str(error)) from error
+
+
+@app.post("/api/embeddings/config")
+def save_embedding_config(request: EmbeddingConfigRequest) -> dict:
+    try:
+        embedding_settings.save_preferences(request.enabled, request.model, request.device)
+        return embedding_settings.public_state()
+    except (ValueError, OSError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@app.get("/api/embeddings/download")
+def embedding_download_status() -> dict:
+    return {"download": embedding_settings.download_status()}
+
+
+@app.post("/api/embeddings/download")
+def download_embedding_model(request: EmbeddingDownloadRequest) -> dict:
+    try:
+        return {"download": embedding_settings.start_download(request.model)}
+    except (ValueError, OSError) as error:
+        raise HTTPException(409, str(error)) from error
+
+
 @app.post("/api/providers/config")
 def save_provider_config(request: ProviderConfigRequest) -> dict:
     try:
@@ -572,6 +616,7 @@ def preview(request: PreviewRequest) -> PreviewResponse:
                 allow_rename=request.rename,
                 allow_sensitive_cloud=request.allow_sensitive_cloud,
                 instructions=request.instructions,
+                semantic_config=embedding_settings.runtime_config(),
             )
             suggestions = result.suggestions
             moves = _content_moves(suggestions, source)
@@ -656,8 +701,11 @@ def _prepare_chat_names(plan: StoredPlan, result: chat_engine.ChatResult, contex
                        if rule.match.extension else
                        fnmatchcase(relative.casefold(), rule.match.glob.replace("\\", "/").casefold()))
             if matched:
-                if rule.action == "move":
-                    parts = rule.target.split("/")
+                if rule.action in {"move", "group_by_language"}:
+                    target = chat_engine.language_target(rule, suggestion)
+                    if target is None:
+                        continue
+                    parts = target.split("/")
                     move.folder, move.subfolder = parts[0], parts[1] if len(parts) == 2 else ""
                     continue
                 if rule.action == "exclude":
@@ -830,6 +878,34 @@ def chat(request: ChatRequest) -> dict:
             raise HTTPException(502, "Chat could not prepare a valid preview. Check Providers and try again.") from error
 
 
+def _validate_dependency_edits(plan: StoredPlan, moves: List[Move]) -> None:
+    """Validate literal local references against the complete edited preview.
+
+    Referenced files are not opened. Unselected/missing targets stay at their
+    original paths; selecting an entire group does not waive link integrity.
+    """
+    def key(path: Path | str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    final_paths = {key(move.src): Path(move.dest) if move.selected else Path(move.src) for move in moves}
+    for suggestion in plan.suggestions:
+        source = Path(suggestion.path)
+        final_source = final_paths.get(key(source), source)
+        for reference in getattr(suggestion, "local_dependencies", []):
+            try:
+                parsed = urlsplit(reference)
+            except ValueError as error:
+                raise HTTPException(409, "A local dependency needs review before these files can move.") from error
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            relative = unquote(parsed.path)
+            original_target = source.parent / relative
+            target = final_paths.get(key(original_target), original_target)
+            if key(final_source.parent / relative) != key(target):
+                raise HTTPException(409, "The edited preview would break a local file reference. "
+                                    "Keep linked files in place or preserve their relative paths and referenced names.")
+
+
 def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
     with plan.lock:
         if plan.attempted:
@@ -843,11 +919,13 @@ def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
         if sanity.requires_confirmation and not request.risk_acknowledged:
             raise HTTPException(409, "Review and acknowledge the unusual plan warnings before organizing.")
 
+        edited_moves = _apply_user_edits(plan, request)
+        _validate_dependency_edits(plan, edited_moves)
         # Mark the preview before touching disk so a concurrent request cannot
         # execute it a second time.
         plan.attempted = True
         plan.apply_state = "applying"
-        plan.moves = _apply_user_edits(plan, request)
+        plan.moves = edited_moves
         for move in plan.moves:
             move.src = str(_resolve_plan_source(move.src, plan.source))
 
@@ -858,6 +936,7 @@ def _apply_plan(plan: StoredPlan, request: ApplyRequest) -> dict:
             str(plan.source),
             dry_run=False,
             source_root=str(plan.source),
+            analysis_stats=plan.analysis_stats,
         )
         plan.apply_state = result.state
         plan.applied = result.state == "success"

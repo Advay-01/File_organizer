@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.core import llm_http
 from app.core.classifier import extract_json
 from app.core.content_intelligence import RESERVED_NAMES, sanitize_windows_filename
+from app.core.naming import preserve_name_tokens
 from app.core.privacy import redact_sensitive
 from app.core.safety import should_skip_directory
 
@@ -75,7 +76,7 @@ class NamingPolicy(StrictModel):
 
 class ChatRule(StrictModel):
     version: Literal[1] = 1
-    action: Literal["move", "exclude", "rename"]
+    action: Literal["move", "exclude", "rename", "group_by_language"]
     match: RuleMatch
     target: str | None
     reason: str = Field(min_length=1, max_length=300)
@@ -83,10 +84,12 @@ class ChatRule(StrictModel):
 
     @model_validator(mode="after")
     def validate_target(self):
-        if self.action == "move":
+        if self.action in {"move", "group_by_language"}:
             if self.target is None:
                 raise ValueError("Move rules need a target.")
             safe_target(self.target)
+            if self.action == "group_by_language" and "/" in self.target:
+                raise ValueError("Language grouping needs a single parent folder.")
         elif self.target is not None:
             raise ValueError("Exclude and rename rules cannot have a target.")
         if self.action == "rename":
@@ -109,6 +112,13 @@ class ChatResult(StrictModel):
         return self
 
 
+def language_target(rule: ChatRule, suggestion) -> str | None:
+    if rule.action != "group_by_language":
+        return rule.target
+    language = getattr(suggestion, "language", "")
+    return safe_target(f"{rule.target}/{language}") if language else None
+
+
 SYSTEM_PROMPT = """You are Sortly's organization assistant. You do not move files.
 Convert the user's request into the smallest set of structured rules for a preview.
 Prefer topic or extension matches over filenames. Reuse existing folders/categories.
@@ -117,6 +127,12 @@ Set the other selectors to null or omit them. Never combine a topic and extensio
 in one rule. For multiple extensions, return a separate rule for each extension.
 For merging, moving or renaming a named proposed folder, use the deterministic folder selector.
 Its scope includes that proposed folder's subfolders; it never refers to an arbitrary disk path.
+For an explicit request to group code by language, use action="group_by_language",
+match={"glob":"*"}, and target=<one parent folder chosen from the request or dataset>.
+This uses verified local language metadata across the matched files; keep CSS and HTML,
+YAML and INI separate. Files without verified language metadata are left unchanged.
+JSON tables and other data documents are not automatically code. Use separate move rules
+for the user's other requests, such as putting notes, invoices and recipes in Documents.
 If ambiguous, ask ONE short needs_clarification question and return no rules.
 For questions (such as why a file is in a folder), answer in reply with no rules.
 For filename preferences use action="rename", target=null and a naming policy:
@@ -174,6 +190,7 @@ def context_for(plan) -> dict:
         files.append({
             "id": index, "path": redact_sensitive(relative),
             "extension": Path(move.src).suffix.lower(),
+            "language": getattr(suggestion, "language", ""),
             "destination_name": redact_sensitive(Path(move.dest).name),
             "target": "/".join(filter(None, (move.folder, move.subfolder))),
             "reason": redact_sensitive(move.reason)[:300] + (
@@ -266,7 +283,7 @@ def _limited_name(name: str, original: str, limit: int, preserve_dates: bool) ->
         candidate = candidate[:budget].rstrip(" ._-")
     if not candidate or candidate.upper() in RESERVED_NAMES:
         return None
-    return candidate + extension
+    return preserve_name_tokens(candidate + extension, original, limit, preserve_dates=preserve_dates)
 
 
 def _apply_naming(move, suggestion, policy: dict, approved_name: dict) -> None:
@@ -368,6 +385,9 @@ def refine(
                        fnmatchcase(relative.casefold(), selector.glob.replace("\\", "/").casefold()))
             if not matched:
                 continue
+            target = language_target(rule, suggestion)
+            if rule.action == "group_by_language" and target is None:
+                continue
             affected.add(index)
             decision_key = f"naming:{index}" if rule.action == "rename" else index
             previous = decisions.get(decision_key)
@@ -384,7 +404,7 @@ def refine(
                     }
                 decision = ("rename", json.dumps(policy, sort_keys=True))
             else:
-                decision = (rule.action, rule.target)
+                decision = (rule.action, target)
             overlaps |= previous is not None and previous != decision
             decisions[decision_key] = decision
             if rule.action == "exclude":
@@ -400,7 +420,7 @@ def refine(
                         and os.path.normcase(os.path.abspath(move.src)) != os.path.normcase(os.path.abspath(move.dest))):
                     move.selected = suggestion.selected = True
             else:
-                parts = safe_target(rule.target).split("/")
+                parts = safe_target(target).split("/")
                 move.folder, move.subfolder = parts[0], parts[1] if len(parts) == 2 else ""
                 move.dest = str(plan.source.joinpath(*parts, Path(move.dest).name))
                 move.selected = suggestion.selected = True
