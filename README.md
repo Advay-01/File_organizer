@@ -8,15 +8,19 @@ Optional local semantic candidates and versioned chat naming
 rules are documented in [Hybrid file intelligence](docs/hybrid-file-intelligence.md).
 Its [evaluation guide](docs/hybrid-evaluation.md) separates fixture checks from real-model accuracy and speed measurements.
 
-[Download Sortly 2.0.0](https://github.com/Advay-01/Sortly/releases/tag/v2.0.0) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
+[Download Sortly 2.0.1](https://github.com/Advay-01/Sortly/releases/tag/v2.0.1) · [What's new](CHANGELOG.md) · [Report an issue](https://github.com/Advay-01/Sortly/issues)
 
 | Your system | Download |
 | --- | --- |
-| Windows x64 | [`Sortly_2.0.0_windows-x64.zip`](https://github.com/Advay-01/Sortly/releases/download/v2.0.0/Sortly_2.0.0_windows-x64.zip) — extract, then run `Sortly_2.0.0_x64-setup.exe` |
+| Windows x64 | [`Sortly_2.0.1_windows-x64.zip`](https://github.com/Advay-01/Sortly/releases/download/v2.0.1/Sortly_2.0.1_windows-x64.zip) — extract, then run `Sortly_2.0.1_x64-setup.exe` |
 | Linux x64 | `.deb` for Debian/Ubuntu, or `.AppImage` |
 | macOS Apple Silicon | `_aarch64.dmg` |
 
 Installers include the local service: Python and Node.js are not required. The Windows ZIP contains the installer, rather than a portable standalone app. `SHA256SUMS` files are optional integrity checks, not the application download. Windows builds are unsigned; macOS builds use ad-hoc signing and are **not Apple notarized**, so macOS may require approval in Privacy & Security. The macOS build targets version 13 or newer. Linux packages are built on Ubuntu 22.04; compatibility with every distribution is not guaranteed.
+
+## Fixed in 2.0.1
+
+HTML pages whose local resources are already missing now show a preview warning. They remain excluded by default for review, but explicitly including them no longer blocks Apply solely because those resources were already absent. Working links stay protected, and assets added after analysis are checked again before Apply.
 
 ## New in 2.0
 
@@ -162,7 +166,7 @@ Outputs:
 
 ```text
 src-tauri/target/release/sortly.exe
-src-tauri/target/release/bundle/nsis/Sortly_2.0.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Sortly_2.0.1_x64-setup.exe
 ```
 
 The installer is currently unsigned. Provider credentials and local sample folders are not bundled. A packaged app can also load an external `sortly.env` or a file specified by `SORTLY_ENV_FILE`.

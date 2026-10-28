@@ -24,7 +24,7 @@ from app.core.privacy import redact_sensitive
 from app.core.safety import FileSnapshot, file_identity
 from app.core.semantic_index import SemanticConfig, SemanticIndex
 from app.core.hybrid_workload import batch_hints, candidate_order, reduce_duplicates
-from app.core.relationships import relationship_groups
+from app.core.relationships import relationship_groups, local_resource_missing
 from app.core.naming import preserve_name_tokens
 from app.core.folder_planning import folder_plan_messages, parse_folder_plan
 from app.models.schemas import FileInfo
@@ -885,6 +885,13 @@ def plan_content_intelligence(
             suggestion = _stored_suggestion(item_id, file, evidence, stored)
             suggestion.local_dependencies = [value for value in evidence.metadata.get("local_dependencies", [])
                                              if isinstance(value, str)][:64]
+            missing = [reference for reference in suggestion.local_dependencies
+                       if local_resource_missing(Path(file.path), reference, Path(output_root))]
+            if missing:
+                suggestion.warnings.append(
+                    f"This file already references {len(missing)} missing local asset(s). "
+                    "Moving it will not repair those existing broken links."
+                )
             suggestion.source_snapshot = file.source_snapshot
             if item_id in dependent_ids:
                 suggestion.requires_relationship_review = True

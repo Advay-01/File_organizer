@@ -10,9 +10,40 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import stat
 from urllib.parse import unquote, urlsplit
 
 from app.core.evidence import EvidenceBundle
+
+
+def local_resource_missing(source: Path, reference: str, root: Path) -> bool:
+    """Prove absence inside the selected tree without following resource links.
+
+    False also means unverified: outside paths, links and inaccessible resources
+    retain the conservative dependency guard. Never open or fetch a resource.
+    """
+    try:
+        parsed = urlsplit(reference)
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            return False
+        relative = unquote(parsed.path)
+        if "\\" in relative or "\x00" in relative or Path(relative).is_absolute() or Path(relative).drive:
+            return False
+        boundary = Path(os.path.abspath(root))
+        target = Path(os.path.abspath(source.parent / relative))
+        parts = target.relative_to(boundary).parts
+        current = boundary
+        for part in (None, *parts):
+            if part is not None:
+                current /= part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                return False
+        return False
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)

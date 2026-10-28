@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.1 - 2026-10-29
+
+### Missing local assets
+
+- Fixed Apply rejecting explicitly included HTML files when their referenced local assets were already missing. These pre-existing broken links now produce a clear preview warning; moving a page does not repair its missing resources.
+- Kept linked pages excluded by default for review. Explicit inclusion still cannot break references to existing assets, including unselected files. Apply rechecks resource presence so an asset added after analysis remains protected.
+- Absence checks inspect only metadata inside the selected tree and do not follow symlinks or Windows reparse points. Outside, inaccessible and unverified resources retain the conservative dependency guard. Source identity, content fingerprints, no-overwrite moves and Undo protections remain unchanged.
+- Added regressions for missing and newly created assets, cached previews, explicit Apply/Undo, nested missing paths, outside references, permission failures and redirected paths. Local verification: 588 Python tests and 53 subtests, 27 frontend tests, TypeScript and the production build passed; native CI repeats backend/frontend and startup checks on every platform.
+
+### Downloads and limitations
+
+- Windows x64 ships as `Sortly_2.0.1_windows-x64.zip`, containing `Sortly_2.0.1_x64-setup.exe`. Linux `.deb`/AppImage and Apple Silicon macOS DMG packages retain their native formats, with per-platform SHA-256 checksums.
+- No UI styling, AI classification, embedding configuration or model weights changed. Personal datasets and hackathon presentation files are not bundled.
+- The existing Linux GTK dependency advisory [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g) remains unresolved upstream in the bundled dependency chain; this patch does not fix it. Windows remains unsigned and macOS uses ad-hoc signing without Apple notarization.
+
 ## 2.0.0 - 2026-10-28
 
 ### Hybrid organization and chat

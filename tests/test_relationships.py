@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 from pypdf import PdfWriter
-import pytest
 
 from app.core.evidence import (
     EvidenceBundle,
@@ -16,9 +17,29 @@ from app.core.evidence import (
     _xmp_relationship_metadata,
     extract_evidence,
 )
-from app.core.relationships import relationship_groups
+from app.core.relationships import local_resource_missing, relationship_groups
 from app.models.schemas import FileInfo
 
+
+def test_resource_absence_is_checked_without_reading_contents_or_resolving_links(tmp_path):
+    with patch('pathlib.Path.open', side_effect=AssertionError('Do not read assets')):
+        assert local_resource_missing(tmp_path / 'page.html', 'missing/style.css', tmp_path)
+        asset = tmp_path / 'style.css'
+        asset.touch()
+        assert not local_resource_missing(tmp_path / 'page.html', 'style.css', tmp_path)
+
+
+@pytest.mark.parametrize('reference', ['../outside.css', '//server/share.css', 'https://example.invalid/style.css', r'C:\outside.css'])
+def test_unknown_or_external_resources_are_not_inspected(tmp_path, reference):
+    with patch('pathlib.Path.lstat', side_effect=AssertionError('Do not inspect outside the root')):
+        assert not local_resource_missing(tmp_path / 'page.html', reference, tmp_path)
+
+
+def test_inaccessible_and_redirected_resources_keep_the_strict_guard(tmp_path):
+    with patch('pathlib.Path.lstat', side_effect=PermissionError):
+        assert not local_resource_missing(tmp_path / 'page.html', 'style.css', tmp_path)
+    with patch('pathlib.Path.lstat', return_value=SimpleNamespace(st_mode=stat.S_IFLNK)):
+        assert not local_resource_missing(tmp_path / 'page.html', 'style.css', tmp_path)
 
 def bundle(path="/chosen/file.txt", content="ordinary evidence", metadata=None, **kwargs):
     return EvidenceBundle(

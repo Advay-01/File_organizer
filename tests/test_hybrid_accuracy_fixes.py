@@ -168,6 +168,45 @@ def test_moving_only_the_asset_cannot_break_an_unselected_page(tmp_path):
     with pytest.raises(HTTPException): api._validate_dependency_edits(plan,moves)
 
 
+def test_missing_assets_do_not_block_a_page_move_but_new_assets_are_rechecked(tmp_path):
+    page = tmp_path / 'page.html'
+    page.write_text('<link rel="stylesheet" href="style.css"><script src="app.js"></script>')
+    suggestion = SimpleNamespace(path=str(page), local_dependencies=['style.css', 'app.js'])
+    plan = api.StoredPlan(tmp_path, [], suggestions=[suggestion])
+    moves = [Move(str(page), str(tmp_path / 'Pages/page.html'), 'Pages', 'preview')]
+    api._validate_dependency_edits(plan, moves)
+    (tmp_path / 'style.css').write_text('body { color: blue; }')
+    with pytest.raises(HTTPException, match='local file reference'):
+        api._validate_dependency_edits(plan, moves)
+
+
+def test_missing_resource_warning_preserves_default_relationship_review(tmp_path):
+    page = tmp_path / 'page.html'
+    page.write_text('<!DOCTYPE html><html><head><title>Campus reading guide</title>'
+                    '<link rel="stylesheet" href="style.css"></head><body>'
+                    '<h1>Campus reading guide</h1><p>' + 'Campus reading guide explains study rooms and library services. ' * 8 + '</p></body></html>')
+    file = FileInfo(path=str(page), filename=page.name, extension='.html', size_kb=1, date_created='')
+    def complete(messages):
+        card = json.loads(messages[-1]['content'])['files'][0]
+        return json.dumps({'files': [{'id': card['id'], 'category': 'Campus', 'subcategory': 'Guides',
+            'confidence': 'high', 'reasoning': 'Campus reading guide', 'evidence_quote': 'Campus reading guide',
+            'filename_conflict': 'none', 'suggested_name': '', 'name_evidence': ''}]})
+    with closing(ContentIntelligenceCache(tmp_path / 'cache.db')) as cache:
+        for _ in range(2):
+            item = plan_content_intelligence([file], str(tmp_path), ['fixture/model'], cache=cache,
+                completion_fn=complete, semantic_config=SemanticConfig(enabled=False)).suggestions[0]
+            assert not item.selected and item.requires_relationship_review
+            assert any('already references 1 missing local asset' in warning for warning in item.warnings)
+        # Explicit inclusion uses the real Apply path, without a provider call.
+        move = intelligence.suggestion_to_move(item, tmp_path / 'Pages' / 'HTML' / page.name)
+        plan = api.StoredPlan(tmp_path, [move], [item])
+        response = api._apply_plan(plan, api.ApplyRequest(plan_id='missing-assets', risk_acknowledged=True,
+            files=[{'id': '0', 'accepted': True, 'target_path': 'Pages/HTML', 'destination_name': page.name}]))
+        assert response['moved'] == 1
+        assert api.history.undo_last_run(str(tmp_path))['restored'] == 1
+        assert page.exists()
+
+
 def test_fresh_path_validation_still_blocks_a_new_project_between_passes(tmp_path):
     source=tmp_path/'notes.txt'
     source.write_text('content')

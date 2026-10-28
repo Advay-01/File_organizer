@@ -41,6 +41,7 @@ from app.core.content_intelligence import (
 )
 from app.core.executor import execute_plan
 from app.core.planner import Move, sanitize_target_path
+from app.core.relationships import local_resource_missing
 from app.core.plan_sanity import evaluate_plan
 from app.core.safety import (
     ScanPolicy,
@@ -902,6 +903,10 @@ def _validate_dependency_edits(plan: StoredPlan, moves: List[Move]) -> None:
             original_target = source.parent / relative
             target = final_paths.get(key(original_target), original_target)
             if key(final_source.parent / relative) != key(target):
+                if key(original_target) not in final_paths and local_resource_missing(source, reference, plan.source):
+                    # The preview cannot break a link that was already absent.
+                    # Recheck on Apply: an asset added after analysis is protected.
+                    continue
                 raise HTTPException(409, "The edited preview would break a local file reference. "
                                     "Keep linked files in place or preserve their relative paths and referenced names.")
 
