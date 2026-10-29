@@ -126,10 +126,31 @@ def is_system_path(path: Path) -> bool:
 
 def resolved_inside(path: Path, root: Path) -> bool:
     try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
+        return _is_within_path(path.resolve(strict=False), root.resolve(strict=False))
     except (OSError, ValueError, RuntimeError):
         return False
+
+
+def _canonical_path(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(os.path.realpath(os.fspath(path))))
+
+
+def _is_within_path(path: Path, root: Path) -> bool:
+    try:
+        candidate = _canonical_path(path)
+        boundary = _canonical_path(root)
+        return os.path.commonpath([candidate, boundary]) == boundary
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
+    if not _is_within_path(path, root):
+        raise ValueError(f"{path!s} is not in the subpath of {root!s}")
+    relative = os.path.relpath(_canonical_path(path), _canonical_path(root))
+    if relative in {"", "."}:
+        return ()
+    return tuple(part for part in Path(relative).parts if part not in {"", "."})
 
 
 def _protected_roots() -> list[tuple[Path, bool]]:
@@ -277,9 +298,9 @@ def validate_move_paths(
         destination_resolved = destination.resolve(strict=False)
     except (OSError, RuntimeError) as error:
         raise UnsafePathError(f"Could not resolve file operation path: {error}") from error
-    if not source_resolved.is_relative_to(approved_source_root):
+    if not _is_within_path(source_resolved, approved_source_root):
         raise UnsafePathError("Source file resolves outside its approved root.")
-    if not destination_resolved.is_relative_to(root):
+    if not _is_within_path(destination_resolved, root):
         raise UnsafePathError("Destination resolves outside the approved root.")
     if not source_resolved.is_file():
         raise UnsafePathError("Source is not a regular file.")
@@ -293,12 +314,12 @@ def validate_move_paths(
         for parent in destination_parents
     ):
         raise UnsafePathError("File operations may not traverse symlinks or junctions.")
-    relative_parts = destination_resolved.relative_to(root).parts
+    relative_parts = _relative_parts(destination_resolved, root)
     if any(part in {".", ".."} for part in destination.parts):
         raise UnsafePathError("Destination contains an unsafe relative path.")
     if any(part.casefold() in PROTECTED_NAMES for part in relative_parts):
         raise UnsafePathError("Destination uses a protected directory name.")
-    source_parts = source_resolved.relative_to(approved_source_root).parts
+    source_parts = _relative_parts(source_resolved, approved_source_root)
     if any(part.casefold() in PROTECTED_NAMES for part in source_parts):
         raise UnsafePathError("Source uses a protected directory name.")
     for parents, boundary in ((source_parents, approved_source_root), (destination_parents, root)):
