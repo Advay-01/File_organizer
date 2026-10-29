@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import api
+from app.core import safety
 from app.core.content_intelligence import ContentSuggestion, plan_content_intelligence
 from app.core.evidence import extract_evidence, extract_snippet
 from app.core.plan_sanity import evaluate_plan
@@ -165,6 +166,21 @@ class ScanSafetyTests(unittest.TestCase):
             validate_move_paths(source, self.root.parent / "outside.txt", self.root)
         with self.assertRaises(UnsafePathError):
             validate_move_paths(source, self.root / "node_modules" / "x.txt", self.root)
+
+    def test_windows_alias_paths_are_treated_as_inside_root(self):
+        root = Path("C:/Users/runneradmin/AppData/Local/Temp/tmp123")
+        source = Path("C:/Users/RUNNER~1/AppData/Local/Temp/tmp123/file.txt")
+        destination = Path("C:/Users/RUNNER~1/AppData/Local/Temp/tmp123/Folder/file.txt")
+        mapping = {
+            str(root): "C:/Users/runneradmin/AppData/Local/Temp/tmp123",
+            str(source): "C:/Users/runneradmin/AppData/Local/Temp/tmp123/file.txt",
+            str(destination): "C:/Users/runneradmin/AppData/Local/Temp/tmp123/Folder/file.txt",
+        }
+
+        with patch("app.core.safety.os.path.realpath", side_effect=lambda p: mapping.get(str(p), str(p))):
+            with patch("app.core.safety.os.path.normcase", side_effect=lambda p: str(p).lower()):
+                self.assertTrue(safety._is_within_path(source, root))
+                self.assertEqual(safety._relative_parts(destination, root), ("folder", "file.txt"))
 
     @unittest.skipUnless(os.name == "nt", "Windows junction behavior")
     def test_move_cannot_traverse_destination_junction(self):
